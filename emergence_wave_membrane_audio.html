@@ -1,0 +1,628 @@
+<!doctype html>
+<!--
+  emergence machine · visualization
+  substrate:    Driven membrane — 2D wave equation, FDTD with damping
+                ( u_next = (2−γ)u − (1−γ)u_prev + c² ∇²u ), Dirichlet edges,
+                three time-steps per render frame so ripples cross the field
+                fast enough to read against a 130 BPM grid.
+  modulation:   audio — per-band onset detection drives localized impulses:
+                  · bass-onset (kick)   → centre impulse, large amplitude
+                  · mid-onset  (snare)  → off-centre impulses, alternating sides
+                  · treble-onset (hat)  → small impulses near the edges
+                continuous treble level → damping (defines how cleanly each
+                beat separates from the next).
+  mechanism:    membrane displacement field on a discrete lattice; cells exchange
+                energy only with their four neighbours under the wave equation.
+                Onsets do not draw rings — they push a Gaussian bump into u;
+                the rings are what the substrate does with that bump.
+  source:       user-loaded WAV via file picker.
+  fallback:     scheduled impulses on a steady 4/4 grid (~130 BPM) when no audio
+                is loaded, so the membrane is alive immediately.
+  notes:        tokens unchanged. Wave amplitude maps |u| through a paper-toned
+                ramp; only the strongest crests touch ember. A bipolar sign-
+                accent (warm/cool pair) marks crests vs troughs — this is the
+                single permitted pairing per §3 (positive/negative is the
+                substrate's intrinsic duality, not added decoration).
+                Retune (v3): onset detection switched to spectral-flux per band
+                so steady hi-hat patterns fire correctly (the prior rise-above-
+                mean detector tracked the steady level and missed them). Kick
+                amplitude reduced and radius widened so its wake does not
+                drown smaller hits. LUT low-end brightened so small ripples
+                read clearly on the dark background. Hat onsets emit a
+                mirrored impulse pair near top/bottom so the rhythm reads
+                spatially even when the kick's wake fills the centre.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>emergence · driven membrane · audio</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;1,400&family=JetBrains+Mono:wght@300;400&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ink:        #0a0907;
+    --ink-2:      #14110d;
+    --paper:      #e8e1d4;
+    --paper-dim:  #948876;
+    --ember:      #c9844a;
+    --slate:      #6b8a8f;
+    --rule:       rgba(232, 225, 212, 0.12);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; background: var(--ink); color: var(--paper); font-family: 'Cormorant Garamond', serif; overflow: hidden; }
+  #stage { position: fixed; inset: 0; display: block; background: var(--ink); }
+
+  .hud { position: fixed; font-family: 'JetBrains Mono', monospace; font-weight: 300; font-size: 10px; letter-spacing: 0.24em; text-transform: lowercase; color: var(--paper-dim); pointer-events: none; user-select: none; }
+  .hud.tl { top: 28px; left: 32px; }
+  .hud.tr { top: 28px; right: 32px; text-align: right; }
+  .hud.bl { bottom: 28px; left: 32px; max-width: 50ch; }
+  .hud.br { bottom: 28px; right: 32px; }
+  .hud .rule { display: block; width: 32px; height: 1px; background: var(--rule); margin: 10px 0; }
+  .hud.tr .rule { margin-left: auto; }
+  .hud .k { color: var(--paper-dim); }
+  .hud .v { color: var(--paper); }
+
+  /* onset indicators — three single-pixel marks that flash when a band onset fires.
+     This is HUD chrome (annotation of mechanism state), not the substrate output. */
+  .onsets { margin-top: 10px; display: flex; gap: 14px; align-items: center; }
+  .onsets .dot { width: 4px; height: 4px; border: 1px solid var(--rule); transition: background-color 80ms ease, border-color 80ms ease; }
+  .onsets .dot.lit { background: var(--paper); border-color: var(--paper); }
+  .onsets .dot.kick.lit { background: var(--ember); border-color: var(--ember); }
+  .onsets label { font-size: 9px; letter-spacing: 0.28em; color: var(--paper-dim); }
+
+  .caption { font-family: 'Cormorant Garamond', serif; font-style: italic; font-weight: 400; font-size: 14px; line-height: 1.55; color: var(--paper-dim); letter-spacing: 0; text-transform: none; }
+  .caption em { color: var(--paper); font-style: italic; }
+
+  #entry { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 28px; background: radial-gradient(ellipse at center, rgba(10,9,7,0.55) 0%, rgba(10,9,7,0.92) 70%); z-index: 10; transition: opacity 1.2s ease, visibility 1.2s ease; }
+  #entry.gone { opacity: 0; visibility: hidden; }
+  #entry .title { font-family: 'Cormorant Garamond', serif; font-weight: 300; font-style: italic; font-size: 38px; color: var(--paper); letter-spacing: 0; text-align: center; max-width: 32ch; line-height: 1.2; }
+  #entry .sub { font-family: 'JetBrains Mono', monospace; font-weight: 300; font-size: 11px; color: var(--paper-dim); letter-spacing: 0.32em; text-transform: lowercase; text-align: center; }
+  #entry label.pick { display: inline-block; cursor: pointer; padding: 14px 26px; border: 1px solid var(--rule); color: var(--paper); font-family: 'JetBrains Mono', monospace; font-weight: 300; font-size: 11px; letter-spacing: 0.32em; text-transform: lowercase; background: transparent; transition: border-color 0.4s ease, color 0.4s ease; }
+  #entry label.pick:hover { border-color: var(--paper); color: var(--ember); }
+  #entry input[type=file] { display: none; }
+  #entry .hint { font-family: 'JetBrains Mono', monospace; font-weight: 300; font-size: 9px; letter-spacing: 0.32em; color: var(--paper-dim); text-transform: lowercase; opacity: 0.65; text-align: center; }
+  #entry .hint code { color: var(--paper); font-family: 'JetBrains Mono', monospace; font-size: 9px; }
+  body.dragging #entry { background: radial-gradient(ellipse at center, rgba(201,132,74,0.10) 0%, rgba(10,9,7,0.94) 70%); }
+  body.dragging #entry label.pick { border-color: var(--ember); color: var(--ember); }
+</style>
+</head>
+<body>
+
+<canvas id="stage"></canvas>
+
+<div class="hud tl">
+  <div><span class="k">substrate</span> &nbsp; <span class="v">driven membrane (wave eq. FDTD)</span></div>
+  <span class="rule"></span>
+  <div><span class="k">lattice</span> &nbsp; <span class="v" id="hudGrid">—</span></div>
+  <div><span class="k">c² · γ</span> &nbsp; <span class="v" id="hudPhys">—</span></div>
+  <div class="onsets">
+    <div><span class="dot kick" id="dKick"></span> &nbsp;<label>kick</label></div>
+    <div><span class="dot" id="dSnare"></span> &nbsp;<label>mid</label></div>
+    <div><span class="dot" id="dHat"></span> &nbsp;<label>hat</label></div>
+  </div>
+</div>
+
+<div class="hud tr">
+  <div><span class="k">modulation</span> &nbsp; <span class="v" id="hudMod">awaiting source</span></div>
+  <span class="rule"></span>
+  <div><span class="k">impulses laid</span> &nbsp; <span class="v" id="hudImp">0</span></div>
+  <div><span class="k">field energy</span> &nbsp; <span class="v" id="hudE">0.00</span></div>
+</div>
+
+<div class="hud bl">
+  <div class="caption">
+    <em>Substrate</em>: 2D wave equation on a discrete membrane.
+    <em>Local rule</em>: each cell's next displacement is set by its previous,
+    its neighbours, and a small damping; nothing else.
+    Each kick is a Gaussian impulse pushed into one cell of the field — the
+    ring you see expanding is the membrane relaxing, not a circle being
+    drawn. Successive beats interfere with the wake of earlier ones.
+  </div>
+</div>
+
+<div class="hud br">
+  <div><span class="k">fps</span> &nbsp; <span class="v" id="hudFps">—</span></div>
+</div>
+
+<div id="entry">
+  <div class="title">a beat is not a sound. it is a thing that happens to a surface.</div>
+  <div class="sub">driven membrane · audio modulation · single-file artifact</div>
+  <label class="pick" for="picker">load audio</label>
+  <input id="picker" type="file" accept="audio/*">
+  <div class="hint">drop a <code>.wav</code> / <code>.mp3</code> anywhere, or click above.<br>without audio the membrane runs on a 130 bpm carrier.</div>
+</div>
+
+<audio id="audioEl" loop crossorigin="anonymous"></audio>
+
+<script>
+(() => {
+  'use strict';
+
+  /* ============================================================
+     1. canvas + DPR
+     ============================================================ */
+  const canvas = document.getElementById('stage');
+  const dctx = canvas.getContext('2d', { alpha: false });
+  const DPR_CAP = 2;
+
+  let DW = 0, DH = 0;
+  let GW = 0, GH = 0;
+
+  // Three displacement buffers; rotate each sub-step.
+  let u = null, uPrev = null, uNext = null;
+
+  let imgCanvas, imgCtx, imgBuf;
+
+  function resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, DPR_CAP);
+    DW = Math.floor(window.innerWidth  * dpr);
+    DH = Math.floor(window.innerHeight * dpr);
+    canvas.width = DW; canvas.height = DH;
+    canvas.style.width = window.innerWidth + 'px';
+    canvas.style.height = window.innerHeight + 'px';
+
+    // Target ~120k cells — comfortable for 3 sub-steps × FDTD step
+    const aspect = DW / DH;
+    GH = 300;
+    GW = Math.round(GH * aspect);
+    if (GW * GH > 140000) {
+      GH = Math.round(Math.sqrt(140000 / aspect));
+      GW = Math.round(GH * aspect);
+    }
+
+    const N = GW * GH;
+    u     = new Float32Array(N);
+    uPrev = new Float32Array(N);
+    uNext = new Float32Array(N);
+
+    imgCanvas = document.createElement('canvas');
+    imgCanvas.width = GW; imgCanvas.height = GH;
+    imgCtx = imgCanvas.getContext('2d');
+    imgBuf = imgCtx.createImageData(GW, GH);
+
+    document.getElementById('hudGrid').textContent = GW + '×' + GH;
+  }
+
+  /* ============================================================
+     2. wave-equation FDTD step
+     ============================================================
+     u_next[i] = (2 − γ) · u[i]  −  (1 − γ) · u_prev[i]
+              +  c² · ( u[N] + u[S] + u[E] + u[W] − 4 u[i] )
+     With Dirichlet boundaries (u=0 on edges → reflective walls).
+     Three sub-steps per render frame, so wave speed reads at beat rate.
+     ============================================================ */
+  function step(c2, gamma) {
+    const w = GW, h = GH;
+    const a = (2 - gamma);
+    const b = (1 - gamma);
+    // Interior only; boundary cells remain at 0 (Dirichlet → reflections)
+    for (let y = 1; y < h - 1; y++) {
+      const yc = y * w;
+      const ym = (y - 1) * w;
+      const yp = (y + 1) * w;
+      for (let x = 1; x < w - 1; x++) {
+        const i = yc + x;
+        const lap = u[yc + x - 1] + u[yc + x + 1] + u[ym + x] + u[yp + x] - 4 * u[i];
+        uNext[i] = a * u[i] - b * uPrev[i] + c2 * lap;
+      }
+    }
+    // rotate buffers (no allocation)
+    const tmp = uPrev; uPrev = u; u = uNext; uNext = tmp;
+  }
+
+  /* ============================================================
+     3. impulse injection — the only thing audio does to the field
+     ============================================================ */
+  let impulsesLaid = 0;
+  function injectImpulse(cx, cy, radius, amplitude) {
+    if (!u) return;
+    const r2 = radius * radius;
+    const yMin = Math.max(1, (cy - radius) | 0);
+    const yMax = Math.min(GH - 2, (cy + radius) | 0);
+    const xMin = Math.max(1, (cx - radius) | 0);
+    const xMax = Math.min(GW - 2, (cx + radius) | 0);
+    const sigma2 = r2 * 0.32;
+    for (let y = yMin; y <= yMax; y++) {
+      const dy = y - cy;
+      for (let x = xMin; x <= xMax; x++) {
+        const dx = x - cx;
+        const d2 = dx * dx + dy * dy;
+        if (d2 < r2) {
+          const fall = Math.exp(-d2 / sigma2);
+          u[y * GW + x] += amplitude * fall;
+        }
+      }
+    }
+    impulsesLaid++;
+  }
+
+  /* ============================================================
+     4. palette LUT — bipolar (cool troughs / warm crests)
+     ============================================================
+     Crests (u > 0): ink → paper-dim → paper → ember.
+     Troughs (u < 0): ink → paper-dim → paper → slate.
+     The cool/warm pair is the substrate's intrinsic ± duality — the only
+     two-accent case permitted by §3.
+     ============================================================ */
+  const INK     = [10, 9, 7];
+  const PAPER_D = [148, 136, 118];
+  const PAPER   = [232, 225, 212];
+  const EMBER   = [201, 132, 74];
+  const SLATE   = [107, 138, 143];
+
+  // 2 × 64 LUT: [sign][magnitude_idx][rgba]
+  const LUT_POS = new Uint8ClampedArray(64 * 4);
+  const LUT_NEG = new Uint8ClampedArray(64 * 4);
+  let lutBuilt = false;
+
+  function lerp(a, b, t) { return a + (b - a) * t; }
+
+  function buildLUT() {
+    function fill(arr, TOP) {
+      for (let i = 0; i < 64; i++) {
+        const t = i / 63;
+        const tg = Math.pow(t, 0.42);            // brighter low-amplitude response
+        let r, g, bl;
+        if (tg < 0.38) {
+          const k = tg / 0.38;
+          r  = lerp(INK[0], PAPER_D[0], k);
+          g  = lerp(INK[1], PAPER_D[1], k);
+          bl = lerp(INK[2], PAPER_D[2], k);
+        } else if (tg < 0.78) {
+          const k = (tg - 0.38) / 0.40;
+          r  = lerp(PAPER_D[0], PAPER[0], k);
+          g  = lerp(PAPER_D[1], PAPER[1], k);
+          bl = lerp(PAPER_D[2], PAPER[2], k);
+        } else {
+          const k = (tg - 0.78) / 0.22;
+          r  = lerp(PAPER[0], TOP[0], k);
+          g  = lerp(PAPER[1], TOP[1], k);
+          bl = lerp(PAPER[2], TOP[2], k);
+        }
+        const o = i * 4;
+        arr[o]     = r;
+        arr[o + 1] = g;
+        arr[o + 2] = bl;
+        arr[o + 3] = 255;
+      }
+    }
+    fill(LUT_POS, EMBER);
+    fill(LUT_NEG, SLATE);
+    lutBuilt = true;
+  }
+
+  function paint() {
+    if (!lutBuilt) buildLUT();
+    const data = imgBuf.data;
+    const n = GW * GH;
+    const scale = 1 / 1.0;       // map |u| ≈ 1.0 to LUT top (propagating waves use more of the LUT)
+    for (let i = 0; i < n; i++) {
+      const v = u[i];
+      const m = Math.abs(v) * scale;
+      let mi = (m * 63) | 0;
+      if (mi > 63) mi = 63;
+      const lut = v >= 0 ? LUT_POS : LUT_NEG;
+      const li = mi * 4;
+      const o = i * 4;
+      data[o]     = lut[li];
+      data[o + 1] = lut[li + 1];
+      data[o + 2] = lut[li + 2];
+      data[o + 3] = 255;
+    }
+    imgCtx.putImageData(imgBuf, 0, 0);
+    dctx.fillStyle = '#0a0907';
+    dctx.fillRect(0, 0, DW, DH);
+    dctx.imageSmoothingEnabled = true;
+    dctx.imageSmoothingQuality = 'high';
+    dctx.drawImage(imgCanvas, 0, 0, DW, DH);
+  }
+
+  /* ============================================================
+     5. audio (Web Audio + per-band onset detector)
+     ============================================================ */
+  const audioEl = document.getElementById('audioEl');
+  let actx = null, srcNode = null, analyser = null;
+  let freqBuf = null;
+  let audioReady = false;
+
+  // Spectral-flux onset detector — one state per band.
+  // Each frame we measure positive change in band energy (flux), keep a slow
+  // running-mean of that flux, and fire when current flux > mean * multiplier
+  // AND > absolute floor AND debounce-time elapsed.
+  const onsetState = {
+    bass:   { flux: 0, mean: 0.001, last: -999, mult: 2.4, floor: 0.018, debounceMs: 120 },
+    mid:    { flux: 0, mean: 0.001, last: -999, mult: 2.0, floor: 0.012, debounceMs: 70  },
+    treble: { flux: 0, mean: 0.001, last: -999, mult: 1.7, floor: 0.008, debounceMs: 38  }
+  };
+  let prevFFT = null;   // previous frame's frequency bytes (for flux)
+
+  // For HUD indicators
+  let kickFlashUntil = 0, snareFlashUntil = 0, hatFlashUntil = 0;
+  // Side alternator for snare/clap
+  let snareSide = 0;
+  // Smoothed treble level (drives damping)
+  let trebleSm = 0;
+
+  function ensureCtx() {
+    if (actx) return;
+    actx = new (window.AudioContext || window.webkitAudioContext)();
+    srcNode = actx.createMediaElementSource(audioEl);
+    analyser = actx.createAnalyser();
+    analyser.fftSize = 4096;
+    analyser.smoothingTimeConstant = 0.05;        // very low → transients fully survive (flux relies on this)
+    srcNode.connect(analyser);
+    analyser.connect(actx.destination);
+    freqBuf  = new Uint8Array(analyser.frequencyBinCount);
+    prevFFT  = new Uint8Array(analyser.frequencyBinCount);
+  }
+
+  function loadFile(file) {
+    if (!file) return;
+    try {
+      const url = URL.createObjectURL(file);
+      audioEl.src = url;
+      audioEl.loop = true;
+      ensureCtx();
+      const p = audioEl.play();
+      if (p && p.then) {
+        p.then(() => {
+          audioReady = true;
+          const nm = file.name.length > 28 ? file.name.slice(0, 26) + '…' : file.name;
+          document.getElementById('hudMod').textContent = 'audio · ' + nm;
+          document.getElementById('entry').classList.add('gone');
+        }).catch(err => {
+          document.getElementById('hudMod').textContent = 'audio · play blocked';
+          console.warn('play() rejected:', err);
+        });
+      }
+    } catch (e) { console.warn(e); }
+  }
+
+  // Read FFT → per-band spectral flux + continuous level (for damping HUD).
+  // Spectral flux = Σ max(0, current_bin − prev_bin) over that band.
+  // This is the standard onset-detection function and works on steady
+  // hi-hat patterns where simple "rise above slow mean" fails (mean tracks
+  // the steady level → no rise).
+  function readBandsAudio() {
+    analyser.getByteFrequencyData(freqBuf);
+    const nbin = freqBuf.length;
+    const hzPerBin = (actx.sampleRate * 0.5) / nbin;
+
+    // Narrower, more selective bands — important for techno where bass synths
+    // and pads otherwise contaminate the mid band.
+    //   bass : 30–160 Hz (kick fundamental + 1st harmonic only)
+    //   mid  : 200–2200 Hz (snare/clap)
+    //   hat  : 3500–11000 Hz (closed/open hi-hat, shaker, ride)
+    let fluxB = 0, fluxM = 0, fluxT = 0;
+    let levB = 0, levM = 0, levT = 0;
+    let cB = 0, cM = 0, cT = 0;
+
+    for (let i = 1; i < nbin; i++) {
+      const hz = i * hzPerBin;
+      const cur = freqBuf[i];
+      const prev = prevFFT[i];
+      const d = cur - prev;
+      const dp = d > 0 ? d : 0;
+      const a = Math.sqrt(cur / 255);
+
+      if (hz >= 30 && hz < 160) {
+        fluxB += dp / 255;
+        levB += a; cB++;
+      } else if (hz >= 200 && hz < 2200) {
+        fluxM += dp / 255;
+        levM += a; cM++;
+      } else if (hz >= 3500 && hz < 11000) {
+        fluxT += dp / 255;
+        levT += a; cT++;
+      }
+      prevFFT[i] = cur;
+    }
+
+    // Normalise flux by band-bin-count so thresholds are band-agnostic.
+    return {
+      bassFlux:   cB ? fluxB / cB : 0,
+      midFlux:    cM ? fluxM / cM : 0,
+      hatFlux:    cT ? fluxT / cT : 0,
+      bassLevel:  cB ? levB / cB : 0,
+      midLevel:   cM ? levM / cM : 0,
+      hatLevel:   cT ? levT / cT : 0
+    };
+  }
+
+  // Per-band onset detection on the flux signal.
+  // Fire when flux > max(running-mean × multiplier, floor) AND debounce passed.
+  // strength = how much current flux exceeds the running mean (clipped).
+  function detectOnsets(bands, now) {
+    const events = [];
+    const map = [
+      ['bass',   bands.bassFlux],
+      ['mid',    bands.midFlux],
+      ['treble', bands.hatFlux]
+    ];
+    for (let k = 0; k < map.length; k++) {
+      const key = map[k][0];
+      const fx  = map[k][1];
+      const s = onsetState[key];
+      const trig = Math.max(s.mean * s.mult, s.floor);
+      if (fx > trig && (now - s.last) > s.debounceMs) {
+        s.last = now;
+        // strength is the normalised over-trigger — useful for impulse sizing
+        const strength = Math.min(1, (fx - trig) / Math.max(trig, 0.005));
+        events.push({ band: key, strength: strength });
+      }
+      // running mean tracks the smoothed flux floor
+      s.mean = s.mean * 0.92 + fx * 0.08;
+      s.flux = fx;
+    }
+    return events;
+  }
+
+  /* ============================================================
+     6. synthetic 130 BPM carrier for the fallback
+     ============================================================ */
+  // 4/4 grid with kick on every beat, snare on 2 & 4, hat on 8ths
+  let synthNextKickAt = 0, synthBeat = 0;
+  const BPM = 130;
+  const BEAT_MS = 60000 / BPM;
+  function synthFire(now) {
+    if (now < synthNextKickAt) return [];
+    const events = [];
+    events.push({ band: 'bass', strength: 0.6 });
+    if (synthBeat % 2 === 1) events.push({ band: 'mid', strength: 0.4 });
+    if ((synthBeat & 1) === 0) events.push({ band: 'treble', strength: 0.25 });
+    events.push({ band: 'treble', strength: 0.2 });    // off-beat hat
+    synthBeat++;
+    synthNextKickAt = now + BEAT_MS;
+    return events;
+  }
+
+  /* ============================================================
+     7. dispatch onsets → impulses (the *only* coupling)
+     ============================================================ */
+  function dispatch(events) {
+    for (let i = 0; i < events.length; i++) {
+      const ev = events[i];
+      if (ev.band === 'bass') {
+        // Kick: centre. Smaller absolute amplitude so its wake doesn't drown
+        // smaller hits — but wider radius so it still reads as the dominant beat.
+        const amp = 0.85 + Math.min(0.5, ev.strength * 0.6);
+        const radius = 14 + (ev.strength * 5) | 0;
+        injectImpulse(GW * 0.5, GH * 0.5, radius, amp);
+        kickFlashUntil = performance.now() + 110;
+      } else if (ev.band === 'mid') {
+        // Snare/clap: off-centre, alternating sides.
+        const xs = snareSide ? 0.30 : 0.70;
+        snareSide = 1 - snareSide;
+        const amp = 0.60 + ev.strength * 0.6;
+        const radius = 8 + (ev.strength * 4) | 0;
+        injectImpulse(GW * xs, GH * 0.50, radius, amp);
+        snareFlashUntil = performance.now() + 90;
+      } else { // treble — hats
+        // Hats: each onset places TWO small impulses (mirror across centre)
+        // so the rhythm reads spatially symmetrical and stays visible against
+        // the kick's circular wake. Bigger radius + stronger floor than before.
+        const yBand = Math.random() < 0.5 ? 0.18 : 0.82;
+        const xJit  = 0.20 + Math.random() * 0.20;
+        const amp = 0.45 + ev.strength * 0.5;
+        injectImpulse(GW * xJit,         GH * yBand, 7, amp);
+        injectImpulse(GW * (1 - xJit),   GH * yBand, 7, amp);
+        hatFlashUntil = performance.now() + 55;
+      }
+    }
+  }
+
+  /* ============================================================
+     8. render loop
+     ============================================================ */
+  let frame = 0;
+  let lastTime = performance.now();
+  let fpsEMA = 60;
+
+  // Physics constants
+  const C2_BASE   = 0.34;       // wave speed² (CFL stable: c² < 0.5 for 4-stencil)
+  const GAMMA_MIN = 0.014;
+  const GAMMA_MAX = 0.040;
+  const SUBSTEPS  = 3;
+
+  const dKick  = document.getElementById('dKick');
+  const dSnare = document.getElementById('dSnare');
+  const dHat   = document.getElementById('dHat');
+  const hudFps  = document.getElementById('hudFps');
+  const hudPhys = document.getElementById('hudPhys');
+  const hudImp  = document.getElementById('hudImp');
+  const hudE    = document.getElementById('hudE');
+  const hudMod  = document.getElementById('hudMod');
+
+  function tick(now) {
+    const dt = now - lastTime;
+    lastTime = now;
+    fpsEMA = fpsEMA * 0.92 + (1000 / Math.max(dt, 1)) * 0.08;
+
+    // Audio in → onset events
+    let events;
+    if (audioReady && analyser) {
+      const bands = readBandsAudio();
+      trebleSm = trebleSm * 0.85 + bands.hatLevel * 0.15;
+      events = detectOnsets(bands, now);
+    } else {
+      // synthetic carrier — also drives trebleSm to mid-level so damping behaves
+      trebleSm = trebleSm * 0.95 + 0.30 * 0.05;
+      events = synthFire(now);
+    }
+    dispatch(events);
+
+    // damping modulated by treble (continuous; the only continuous coupling)
+    const gamma = GAMMA_MIN + Math.min(1, trebleSm * 1.6) * (GAMMA_MAX - GAMMA_MIN);
+    const c2 = C2_BASE;
+
+    // sub-stepped wave-equation integration
+    for (let s = 0; s < SUBSTEPS; s++) step(c2, gamma);
+    paint();
+
+    if ((frame & 3) === 0) {
+      const tNow = performance.now();
+      dKick.classList.toggle('lit', tNow < kickFlashUntil);
+      dSnare.classList.toggle('lit', tNow < snareFlashUntil);
+      dHat.classList.toggle('lit', tNow < hatFlashUntil);
+      hudFps.textContent  = fpsEMA.toFixed(0) + 'fps';
+      hudPhys.textContent = c2.toFixed(2) + ' · ' + gamma.toFixed(3);
+      hudImp.textContent  = impulsesLaid.toString();
+
+      // sample energy (every 8th cell) for HUD
+      let e = 0;
+      for (let i = 0; i < u.length; i += 8) { const v = u[i]; e += v * v; }
+      hudE.textContent = (Math.sqrt(e / (u.length >> 3))).toFixed(3);
+
+      if (!audioReady) {
+        hudMod.textContent = 'autonomous · 130 bpm carrier';
+      } else {
+        const head = hudMod.textContent.split(' · ')[0];
+        hudMod.textContent = head + ' · ' + (audioEl.paused ? 'paused' : 'playing');
+      }
+    }
+
+    frame++;
+    requestAnimationFrame(tick);
+  }
+
+  /* ============================================================
+     9. UI + file handling
+     ============================================================ */
+  const picker = document.getElementById('picker');
+  picker.addEventListener('change', (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (file) loadFile(file);
+  });
+  ['dragenter', 'dragover'].forEach(ev => {
+    window.addEventListener(ev, (e) => { e.preventDefault(); document.body.classList.add('dragging'); });
+  });
+  ['dragleave', 'drop'].forEach(ev => {
+    window.addEventListener(ev, (e) => { e.preventDefault(); document.body.classList.remove('dragging'); });
+  });
+  window.addEventListener('drop', (e) => {
+    e.preventDefault();
+    const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (file) loadFile(file);
+  });
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'r' || e.key === 'R') {
+      // re-quiet the membrane
+      u.fill(0); uPrev.fill(0); uNext.fill(0);
+      impulsesLaid = 0;
+    }
+    if (e.code === 'Space' && audioReady) {
+      if (audioEl.paused) audioEl.play(); else audioEl.pause();
+      e.preventDefault();
+    }
+  });
+
+  window.addEventListener('resize', resize);
+  resize();
+  requestAnimationFrame(tick);
+
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,457 @@
+<!doctype html>
+<!--
+  emergence machine · visualization · scored (pre-analysed timeline)
+  No real-time onset detection. The track was analysed offline (analyze_deep.py)
+  and every onset for every band was extracted with its exact timestamp.
+  This HTML loads track_events.json + the WAV, and at every frame looks up
+  which events fall in [currentTime - lookback, currentTime + lookahead].
+  The visualization is composed *for this track* — different visual regimes
+  for the two halves the spectrogram shows.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>emergence · scored · audio</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;1,400&family=JetBrains+Mono:wght@300;400&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ink:        #0a0907;
+    --paper:      #e8e1d4;
+    --paper-dim:  #948876;
+    --ember:      #c9844a;
+    --slate:      #6b8a8f;
+    --rule:       rgba(232, 225, 212, 0.12);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; background: var(--ink); color: var(--paper); font-family: 'Cormorant Garamond', serif; overflow: hidden; }
+  #stage { position: fixed; inset: 0; display: block; background: var(--ink); }
+
+  .hud { position: fixed; font-family: 'JetBrains Mono', monospace; font-weight: 300; font-size: 10px; letter-spacing: 0.24em; text-transform: lowercase; color: var(--paper-dim); pointer-events: none; user-select: none; }
+  .hud.tl { top: 28px; left: 32px; }
+  .hud.br { bottom: 28px; right: 32px; }
+  .hud .v { color: var(--paper); }
+  .hud .row { display: flex; align-items: center; gap: 8px; }
+  .dot { width: 5px; height: 5px; border: 1px solid var(--rule); display: inline-block; transition: background-color 80ms ease, border-color 80ms ease; }
+  .dot.lit { background: var(--paper); border-color: var(--paper); }
+  .dot.lit.kick { background: var(--ember); border-color: var(--ember); }
+
+  /* Timeline scrubber at the bottom — shows you where in the track we are */
+  .timeline {
+    position: fixed;
+    left: 5%; right: 5%; bottom: 16px;
+    height: 1px;
+    background: var(--rule);
+    pointer-events: none;
+  }
+  .timeline > i {
+    position: absolute; top: -2px;
+    width: 1px; height: 5px;
+    background: var(--paper);
+    left: 0%;
+  }
+
+  #entry { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 28px; background: radial-gradient(ellipse at center, rgba(10,9,7,0.55) 0%, rgba(10,9,7,0.92) 70%); z-index: 10; transition: opacity 1s ease, visibility 1s ease; }
+  #entry.gone { opacity: 0; visibility: hidden; }
+  #entry .title { font-family: 'Cormorant Garamond', serif; font-weight: 300; font-style: italic; font-size: 36px; color: var(--paper); text-align: center; max-width: 32ch; line-height: 1.2; }
+  #entry .sub { font-family: 'JetBrains Mono', monospace; font-weight: 300; font-size: 11px; color: var(--paper-dim); letter-spacing: 0.32em; text-transform: lowercase; text-align: center; max-width: 60ch; }
+  #entry .play { display: inline-block; cursor: pointer; padding: 14px 26px; border: 1px solid var(--rule); color: var(--paper); font-family: 'JetBrains Mono', monospace; font-weight: 300; font-size: 11px; letter-spacing: 0.32em; text-transform: lowercase; background: transparent; }
+  #entry .play:hover { border-color: var(--paper); color: var(--ember); }
+  #entry .hint { font-family: 'JetBrains Mono', monospace; font-weight: 300; font-size: 9px; letter-spacing: 0.32em; color: var(--paper-dim); text-transform: lowercase; opacity: 0.7; text-align: center; }
+  #entry.loading .play { opacity: 0.3; pointer-events: none; }
+</style>
+</head>
+<body>
+
+<canvas id="stage"></canvas>
+
+<div class="hud tl">
+  <div>scored · 184 bpm · 6047 events · 219s</div>
+  <div style="margin-top:10px;" class="row"><span class="dot kick" id="dKick"></span> <span>kick</span></div>
+  <div class="row"><span class="dot" id="dSub"></span> <span>sub</span></div>
+  <div class="row"><span class="dot" id="dBass"></span> <span>bass</span></div>
+  <div class="row"><span class="dot" id="dLowMid"></span> <span>low-mid</span></div>
+  <div class="row"><span class="dot" id="dSnare"></span> <span>snare</span></div>
+  <div class="row"><span class="dot" id="dPerc"></span> <span>perc</span></div>
+  <div class="row"><span class="dot" id="dHat"></span> <span>hat</span></div>
+  <div style="margin-top:10px;"><span id="hudTime">0:00</span> &nbsp; <span id="hudSection" class="v">intro</span></div>
+</div>
+<div class="hud br"><span class="v" id="hudFps">—</span></div>
+
+<div class="timeline"><i id="timelineCursor"></i></div>
+
+<div id="entry" class="loading">
+  <div class="title">scored visualization · all events pre-extracted</div>
+  <div class="sub">load the wav once. every onset is already keyed to its exact timestamp from offline analysis of the file.</div>
+  <input id="picker" type="file" accept="audio/*" style="display:none">
+  <label class="play" for="picker">load audio</label>
+  <div class="hint" id="loadStatus">loading event timeline...</div>
+</div>
+
+<audio id="audioEl" loop></audio>
+
+<script>
+(() => {
+  'use strict';
+
+  // ---- canvas ----
+  const canvas = document.getElementById('stage');
+  const ctx = canvas.getContext('2d');
+  let W = 0, H = 0, cx = 0, cy = 0;
+  const DPR = Math.min(window.devicePixelRatio || 1, 2);
+  function resize() {
+    W = Math.floor(window.innerWidth  * DPR);
+    H = Math.floor(window.innerHeight * DPR);
+    canvas.width = W; canvas.height = H;
+    canvas.style.width = window.innerWidth + 'px';
+    canvas.style.height = window.innerHeight + 'px';
+    cx = W * 0.5; cy = H * 0.5;
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // ---- load the score JSON ----
+  let score = null;
+  // Cursors per band: index of next event to consider
+  const cursors = {};
+  fetch('track_events.json')
+    .then(r => r.json())
+    .then(data => {
+      score = data;
+      for (const band in data.events) cursors[band] = 0;
+      document.getElementById('loadStatus').textContent =
+        'timeline loaded · ' + Object.values(data.events).reduce((s, e) => s + e.length, 0) +
+        ' events · ' + data.duration.toFixed(1) + 's @ ' + data.bpm + ' bpm · click to play';
+      document.getElementById('entry').classList.remove('loading');
+    })
+    .catch(err => {
+      document.getElementById('loadStatus').textContent =
+        'could not load track_events.json — serve this folder via http (e.g. python -m http.server 8765)';
+      console.error(err);
+    });
+
+  // ---- audio ----
+  const audioEl = document.getElementById('audioEl');
+  let audioReady = false;
+  document.getElementById('picker').addEventListener('change', (e) => {
+    const f = e.target.files && e.target.files[0]; if (!f) return;
+    audioEl.src = URL.createObjectURL(f);
+    audioEl.loop = true;
+    audioEl.play().then(() => {
+      audioReady = true;
+      document.getElementById('entry').classList.add('gone');
+      // reset cursors
+      for (const band in cursors) cursors[band] = 0;
+    }).catch(err => console.warn('play() rejected:', err));
+  });
+
+  // ---- per-band envelopes (driven by event lookups) ----
+  const env = { sub:0, kick:0, bass:0, low_mid:0, snare:0, perc:0, hat:0 };
+  const last = { sub:-999, kick:-999, bass:-999, low_mid:-999, snare:-999, perc:-999, hat:-999 };
+  // Each event push adds (0.55 + strength*0.45) to env, env decays per frame:
+  const DECAY = { sub:0.84, kick:0.78, bass:0.82, low_mid:0.86, snare:0.92, perc:0.78, hat:0.78 };
+
+  /**
+   * Drain pending events for each band up to currentTime.
+   * Use cursors as monotonic pointers — avoids re-scanning the full array.
+   */
+  function drainEvents(t) {
+    if (!score) return;
+    for (const band in score.events) {
+      const list = score.events[band];
+      let c = cursors[band];
+      while (c < list.length && list[c][0] <= t) {
+        const ev = list[c];                 // [timeSec, strength]
+        const strength = ev[1];
+        env[band] = Math.min(1.2, env[band] + 0.50 + strength * 0.50);
+        last[band] = performance.now();
+        c++;
+      }
+      cursors[band] = c;
+    }
+    // If user seeked backwards, reset all cursors (rare; allows scrubbing)
+    if (audioEl.currentTime < (cursors.__last_t || 0) - 0.5) {
+      for (const band in score.events) {
+        cursors[band] = 0;
+        const list = score.events[band];
+        while (cursors[band] < list.length && list[cursors[band]][0] < t) cursors[band]++;
+      }
+    }
+    cursors.__last_t = audioEl.currentTime;
+  }
+
+  function decayEnvs() {
+    for (const k in env) env[k] *= DECAY[k];
+  }
+
+  /* =========================================================
+     Visual effect state — particles, slashes, marks
+     ========================================================= */
+  const percMarks = [];      // {x, y, age, life0}
+  const subWaves  = [];      // {phase, age, life0}   slow expanding rings
+  const filaments = [];      // {ang, dist, vDist, life, life0}
+  const hatSparks = [];      // {x, y, life, life0}
+  let snareFlash = 0;        // 0..1 decays after each snare event
+
+  let prevSubLast = -999, prevSnareLast = -999, prevLowMidLast = -999, prevHatLast = -999, prevPercLast = -999;
+
+  function spawnEffects() {
+    const nowMs = performance.now();
+    // SUB: each event spawns a slow expanding ring from centre
+    if (last.sub > prevSubLast) {
+      prevSubLast = last.sub;
+      subWaves.push({ age: 0, life0: 90, intensity: env.sub });
+      if (subWaves.length > 14) subWaves.shift();
+    }
+    // SNARE: capture the flash level
+    if (last.snare > prevSnareLast) {
+      prevSnareLast = last.snare;
+      snareFlash = Math.min(1, snareFlash + 0.8);
+    }
+    // LOW-MID: filaments out from centre, fast outward
+    if (last.low_mid > prevLowMidLast) {
+      prevLowMidLast = last.low_mid;
+      const count = 3 + (env.low_mid * 4 | 0);
+      for (let i = 0; i < count; i++) {
+        const ang = Math.random() * Math.PI * 2;
+        filaments.push({
+          ang, dist: Math.min(W, H) * 0.10,
+          vDist: (0.8 + Math.random() * 1.4) * DPR,
+          life: 45 + (Math.random() * 25 | 0),
+          life0: 45 + (Math.random() * 25 | 0)
+        });
+      }
+      while (filaments.length > 200) filaments.shift();
+    }
+    // PERC: scattered marks at random angles
+    if (last.perc > prevPercLast) {
+      prevPercLast = last.perc;
+      const ang = Math.random() * Math.PI * 2;
+      const dist = Math.min(W, H) * (0.20 + Math.random() * 0.18);
+      percMarks.push({
+        x: cx + Math.cos(ang) * dist,
+        y: cy + Math.sin(ang) * dist,
+        age: 0,
+        life0: 30 + (Math.random() * 20 | 0)
+      });
+      if (percMarks.length > 120) percMarks.shift();
+    }
+    // HAT (sparse in this track but render when present)
+    if (last.hat > prevHatLast) {
+      prevHatLast = last.hat;
+      const n = 1 + (env.hat * 3 | 0);
+      for (let i = 0; i < n; i++) {
+        const topOrBot = Math.random() < 0.5;
+        const x = W * (0.10 + Math.random() * 0.80);
+        const y = topOrBot ? H * (0.10 + Math.random() * 0.08) : H * (0.82 + Math.random() * 0.08);
+        hatSparks.push({ x, y, life: 18, life0: 18 });
+      }
+      while (hatSparks.length > 80) hatSparks.shift();
+    }
+    snareFlash *= 0.90;
+  }
+
+  /* =========================================================
+     Render loop — uses audioEl.currentTime as the master clock
+     ========================================================= */
+  let frame = 0;
+  let lastTime = performance.now();
+  let fpsEMA = 60;
+
+  const dKick   = document.getElementById('dKick');
+  const dSub    = document.getElementById('dSub');
+  const dBass   = document.getElementById('dBass');
+  const dLowMid = document.getElementById('dLowMid');
+  const dSnare  = document.getElementById('dSnare');
+  const dPerc   = document.getElementById('dPerc');
+  const dHat    = document.getElementById('dHat');
+  const hudTime = document.getElementById('hudTime');
+  const hudSection = document.getElementById('hudSection');
+  const hudFps = document.getElementById('hudFps');
+  const timelineCursor = document.getElementById('timelineCursor');
+
+  function formatTime(t) {
+    const m = Math.floor(t / 60);
+    const s = Math.floor(t - m * 60);
+    return m + ':' + (s < 10 ? '0' : '') + s;
+  }
+
+  function tick(now) {
+    const dt = now - lastTime; lastTime = now;
+    fpsEMA = fpsEMA * 0.92 + (1000 / Math.max(dt, 1)) * 0.08;
+
+    if (audioReady && score) {
+      const t = audioEl.currentTime;
+      drainEvents(t);
+      spawnEffects();
+      decayEnvs();
+    } else if (score) {
+      // pre-load preview: nothing
+    }
+
+    // ---- continuous parameters from offline analysis ----
+    let loudness = 0, centroid = 0;
+    if (score && audioReady) {
+      const sec = Math.floor(audioEl.currentTime);
+      if (sec >= 0 && sec < score.loudness_per_sec.length) {
+        loudness = score.loudness_per_sec[sec];
+      }
+      if (sec >= 0 && sec < score.centroid_per_sec.length) {
+        centroid = score.centroid_per_sec[sec];
+      }
+    }
+    // Section flag based on time-in-track
+    const sectionName = !audioReady ? '—' :
+      audioEl.currentTime < 50 ? 'intro' :
+      audioEl.currentTime < 120 ? 'main · I' :
+      audioEl.currentTime < 180 ? 'main · II' : 'outro';
+
+    // ---- BG with subtle radial gradient that warms with centroid ----
+    const warmth = Math.min(1, centroid / 4000);
+    const bgGrad = ctx.createRadialGradient(cx, cy, Math.min(W, H) * 0.05, cx, cy, Math.min(W, H) * 0.6);
+    bgGrad.addColorStop(0, 'rgba(' + (10 + warmth * 14) + ',' + (9 + warmth * 8) + ',' + (7 + warmth * 4) + ',1)');
+    bgGrad.addColorStop(1, '#0a0907');
+    ctx.fillStyle = bgGrad;
+    ctx.fillRect(0, 0, W, H);
+
+    const baseR = Math.min(W, H);
+
+    // ---- SUB: slow expanding ghost rings emanating from centre ----
+    for (let i = subWaves.length - 1; i >= 0; i--) {
+      const wv = subWaves[i];
+      wv.age++;
+      const lf = 1 - (wv.age / wv.life0);
+      if (lf <= 0) { subWaves.splice(i, 1); continue; }
+      const r = baseR * (0.05 + (1 - lf) * 0.45);
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.lineWidth = 1 * DPR + lf * 2 * DPR;
+      ctx.strokeStyle = 'rgba(107, 138, 143, ' + (lf * 0.45 * (0.5 + wv.intensity * 0.5)).toFixed(3) + ')';
+      ctx.stroke();
+    }
+
+    // ---- BASS: rotating ring around the kick, intensity from env ----
+    const bassR = baseR * (0.28 + env.bass * 0.04);
+    const bassPhase = (frame * 0.003) % (Math.PI * 2);
+    const NOTCHES = 24;
+    ctx.lineWidth = 2 * DPR + env.bass * 4 * DPR;
+    ctx.strokeStyle = 'rgba(232, 225, 212, ' + (0.20 + env.bass * 0.45).toFixed(3) + ')';
+    ctx.beginPath();
+    ctx.arc(cx, cy, bassR, 0, Math.PI * 2);
+    ctx.stroke();
+    // notch ticks
+    for (let n = 0; n < NOTCHES; n++) {
+      const ang = bassPhase + (n / NOTCHES) * Math.PI * 2;
+      const r0 = bassR - 4 * DPR;
+      const r1 = bassR + 4 * DPR + env.bass * 6 * DPR;
+      ctx.lineWidth = 1.0 * DPR;
+      ctx.strokeStyle = 'rgba(232, 225, 212, ' + (0.30 + env.bass * 0.40).toFixed(3) + ')';
+      ctx.beginPath();
+      ctx.moveTo(cx + Math.cos(ang) * r0, cy + Math.sin(ang) * r0);
+      ctx.lineTo(cx + Math.cos(ang) * r1, cy + Math.sin(ang) * r1);
+      ctx.stroke();
+    }
+
+    // ---- LOW-MID FILAMENTS — outward-moving threads ----
+    for (let i = filaments.length - 1; i >= 0; i--) {
+      const p = filaments[i];
+      p.life--;
+      p.dist += p.vDist;
+      if (p.life <= 0 || p.dist > Math.max(W, H)) { filaments.splice(i, 1); continue; }
+      const lf = p.life / p.life0;
+      // draw thread as a short line segment behind the point
+      const tail = 16 * DPR * lf;
+      const x1 = cx + Math.cos(p.ang) * p.dist;
+      const y1 = cy + Math.sin(p.ang) * p.dist;
+      const x0 = cx + Math.cos(p.ang) * (p.dist - tail);
+      const y0 = cy + Math.sin(p.ang) * (p.dist - tail);
+      ctx.lineWidth = 1.0 * DPR;
+      ctx.strokeStyle = 'rgba(148, 136, 118, ' + (lf * 0.7).toFixed(3) + ')';
+      ctx.beginPath();
+      ctx.moveTo(x0, y0); ctx.lineTo(x1, y1);
+      ctx.stroke();
+    }
+
+    // ---- KICK: central disc + halo ----
+    const kickBase = baseR * 0.07;
+    const kickR = kickBase * (1 + env.kick * 1.40);
+    const grad = ctx.createRadialGradient(cx, cy, kickR * 0.4, cx, cy, kickR * 3.2);
+    grad.addColorStop(0, 'rgba(201, 132, 74, ' + (0.30 + env.kick * 0.50).toFixed(3) + ')');
+    grad.addColorStop(0.5, 'rgba(201, 132, 74, ' + (0.10 + env.kick * 0.20).toFixed(3) + ')');
+    grad.addColorStop(1, 'rgba(10, 9, 7, 0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath(); ctx.arc(cx, cy, kickR * 3.2, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(cx, cy, kickR, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(232, 225, 212, ' + (0.55 + env.kick * 0.40).toFixed(3) + ')';
+    ctx.fill();
+    ctx.beginPath(); ctx.arc(cx, cy, kickR, 0, Math.PI * 2);
+    ctx.lineWidth = 1.5 * DPR;
+    ctx.strokeStyle = 'rgba(201, 132, 74, ' + (0.4 + env.kick * 0.6).toFixed(3) + ')';
+    ctx.stroke();
+
+    // ---- SNARE: horizontal slash through centre on each event ----
+    if (snareFlash > 0.05) {
+      const slashLen = baseR * (0.50 + snareFlash * 0.20);
+      const slashHalf = slashLen * 0.5;
+      const slashAlpha = Math.min(0.95, snareFlash * 1.5);
+      ctx.lineWidth = 4 * DPR + snareFlash * 10 * DPR;
+      ctx.strokeStyle = 'rgba(232, 225, 212, ' + (slashAlpha * 0.20).toFixed(3) + ')';
+      ctx.beginPath();
+      ctx.moveTo(cx - slashHalf, cy); ctx.lineTo(cx + slashHalf, cy);
+      ctx.stroke();
+      ctx.lineWidth = 1.0 * DPR;
+      ctx.strokeStyle = 'rgba(232, 225, 212, ' + slashAlpha.toFixed(3) + ')';
+      ctx.beginPath();
+      ctx.moveTo(cx - slashHalf, cy); ctx.lineTo(cx + slashHalf, cy);
+      ctx.stroke();
+    }
+
+    // ---- PERC: scattered marks fade over ~40 frames ----
+    for (let i = percMarks.length - 1; i >= 0; i--) {
+      const m = percMarks[i];
+      m.age++;
+      const lf = 1 - (m.age / m.life0);
+      if (lf <= 0) { percMarks.splice(i, 1); continue; }
+      const alpha = lf * 0.85;
+      const size = 2 * DPR + lf * 2.5 * DPR;
+      ctx.fillStyle = 'rgba(232, 225, 212, ' + alpha.toFixed(3) + ')';
+      ctx.beginPath(); ctx.arc(m.x, m.y, size, 0, Math.PI * 2); ctx.fill();
+    }
+
+    // ---- HAT: pinpoint sparks ----
+    for (let i = hatSparks.length - 1; i >= 0; i--) {
+      const s = hatSparks[i];
+      s.life--;
+      if (s.life <= 0) { hatSparks.splice(i, 1); continue; }
+      const lf = s.life / s.life0;
+      ctx.fillStyle = 'rgba(232, 225, 212, ' + (lf * 0.95).toFixed(3) + ')';
+      ctx.beginPath(); ctx.arc(s.x, s.y, 1.5 * DPR + lf * 1.0 * DPR, 0, Math.PI * 2); ctx.fill();
+    }
+
+    // ---- HUD ----
+    if ((frame & 1) === 0) {
+      const N = performance.now();
+      dKick.classList.toggle('lit',   N - last.kick   < 80);
+      dSub.classList.toggle('lit',    N - last.sub    < 80);
+      dBass.classList.toggle('lit',   N - last.bass   < 90);
+      dLowMid.classList.toggle('lit', N - last.low_mid< 140);
+      dSnare.classList.toggle('lit',  N - last.snare  < 200);
+      dPerc.classList.toggle('lit',   N - last.perc   < 80);
+      dHat.classList.toggle('lit',    N - last.hat    < 80);
+      hudFps.textContent = fpsEMA.toFixed(0) + 'fps';
+      hudSection.textContent = sectionName;
+      hudTime.textContent = audioReady ? formatTime(audioEl.currentTime) : '0:00';
+      if (score) {
+        timelineCursor.style.left = ((audioReady ? audioEl.currentTime : 0) / score.duration * 100).toFixed(2) + '%';
+      }
+    }
+    frame++;
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

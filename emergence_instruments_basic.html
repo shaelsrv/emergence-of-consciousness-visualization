@@ -1,0 +1,364 @@
+<!doctype html>
+<!--
+  emergence machine · visualization · instruments
+  Five visual elements, each tied to a different instrument class by
+  frequency band + spectral-flux onset detection:
+      KICK   40 – 120 Hz   → central disc, pulses on each kick hit
+      BASS   60 – 250 Hz   → outer ring around the kick, breathes
+      SNARE  200 – 3000 Hz → horizontal slash through centre on each hit
+      PERC   1 – 5 kHz     → small ticks placed at random angles, fade
+      HAT    5 – 12 kHz    → pinpoint sparks clustered top + bottom edges
+  Every onset is event-driven and decays — no smoothing on the events
+  themselves so transients fire on the frame they happen.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>emergence · instruments · basic</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;1,400&family=JetBrains+Mono:wght@300;400&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ink:        #0a0907;
+    --paper:      #e8e1d4;
+    --paper-dim:  #948876;
+    --ember:      #c9844a;
+    --slate:      #6b8a8f;
+    --rule:       rgba(232, 225, 212, 0.12);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; background: var(--ink); color: var(--paper); font-family: 'Cormorant Garamond', serif; overflow: hidden; }
+  #stage { position: fixed; inset: 0; display: block; background: var(--ink); }
+
+  .hud { position: fixed; font-family: 'JetBrains Mono', monospace; font-weight: 300; font-size: 10px; letter-spacing: 0.24em; text-transform: lowercase; color: var(--paper-dim); pointer-events: none; user-select: none; }
+  .hud.tl { top: 28px; left: 32px; }
+  .hud.br { bottom: 28px; right: 32px; }
+  .hud .v { color: var(--paper); }
+  .hud .row { display: flex; align-items: center; gap: 8px; }
+  .dot { width: 5px; height: 5px; border: 1px solid var(--rule); display: inline-block; transition: background-color 80ms ease, border-color 80ms ease; }
+  .dot.lit { background: var(--paper); border-color: var(--paper); }
+  .dot.lit.kick { background: var(--ember); border-color: var(--ember); }
+
+  #entry { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 28px; background: radial-gradient(ellipse at center, rgba(10,9,7,0.55) 0%, rgba(10,9,7,0.92) 70%); z-index: 10; transition: opacity 1s ease, visibility 1s ease; }
+  #entry.gone { opacity: 0; visibility: hidden; }
+  #entry .title { font-family: 'Cormorant Garamond', serif; font-weight: 300; font-style: italic; font-size: 36px; color: var(--paper); text-align: center; }
+  #entry label.pick { display: inline-block; cursor: pointer; padding: 14px 26px; border: 1px solid var(--rule); color: var(--paper); font-family: 'JetBrains Mono', monospace; font-weight: 300; font-size: 11px; letter-spacing: 0.32em; text-transform: lowercase; }
+  #entry label.pick:hover { border-color: var(--paper); color: var(--ember); }
+  #entry input[type=file] { display: none; }
+  #entry .hint { font-family: 'JetBrains Mono', monospace; font-weight: 300; font-size: 9px; letter-spacing: 0.32em; color: var(--paper-dim); text-transform: lowercase; opacity: 0.7; text-align: center; }
+</style>
+</head>
+<body>
+
+<canvas id="stage"></canvas>
+
+<div class="hud tl">
+  <div>instruments · basic</div>
+  <div style="margin-top:10px;" class="row"><span class="dot kick" id="dKick"></span> <span>kick</span></div>
+  <div class="row"><span class="dot" id="dBass"></span> <span>bass</span></div>
+  <div class="row"><span class="dot" id="dSnare"></span> <span>snare</span></div>
+  <div class="row"><span class="dot" id="dPerc"></span> <span>perc</span></div>
+  <div class="row"><span class="dot" id="dHat"></span> <span>hat</span></div>
+</div>
+<div class="hud br"><span class="v" id="hudFps">—</span></div>
+
+<div id="entry">
+  <div class="title">load the wav.</div>
+  <label class="pick" for="picker">load audio</label>
+  <input id="picker" type="file" accept="audio/*">
+  <div class="hint">five instruments · five visual elements</div>
+</div>
+
+<audio id="audioEl" loop crossorigin="anonymous"></audio>
+
+<script>
+(() => {
+  'use strict';
+
+  const canvas = document.getElementById('stage');
+  const ctx = canvas.getContext('2d');
+  let W = 0, H = 0, cx = 0, cy = 0;
+  const DPR = Math.min(window.devicePixelRatio || 1, 2);
+
+  function resize() {
+    W = Math.floor(window.innerWidth  * DPR);
+    H = Math.floor(window.innerHeight * DPR);
+    canvas.width = W; canvas.height = H;
+    canvas.style.width = window.innerWidth + 'px';
+    canvas.style.height = window.innerHeight + 'px';
+    cx = W * 0.5; cy = H * 0.5;
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // ---- audio ----
+  const audioEl = document.getElementById('audioEl');
+  let actx = null, analyser = null, freqBuf = null, prevFFT = null;
+  let audioReady = false;
+
+  function ensureCtx() {
+    if (actx) return;
+    actx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = actx.createMediaElementSource(audioEl);
+    analyser = actx.createAnalyser();
+    analyser.fftSize = 4096;
+    analyser.smoothingTimeConstant = 0.05;
+    src.connect(analyser);
+    analyser.connect(actx.destination);
+    freqBuf = new Uint8Array(analyser.frequencyBinCount);
+    prevFFT = new Uint8Array(analyser.frequencyBinCount);
+  }
+
+  document.getElementById('picker').addEventListener('change', (e) => {
+    const f = e.target.files && e.target.files[0]; if (!f) return;
+    audioEl.src = URL.createObjectURL(f);
+    audioEl.loop = true;
+    ensureCtx();
+    audioEl.play().then(() => {
+      audioReady = true;
+      document.getElementById('entry').classList.add('gone');
+    }).catch(err => console.warn('play() rejected:', err));
+  });
+
+  // ---- per-instrument bands + onset state ----
+  // Each band has: Hz range, running flux mean, last-fire timestamp.
+  const inst = {
+    kick:  { fLo: 40,   fHi: 120,   mean: 0.001, last: -999, mult: 2.4, floor: 0.020, debounceMs: 110, level: 0, env: 0 },
+    bass:  { fLo: 60,   fHi: 250,   mean: 0.001, last: -999, mult: 2.0, floor: 0.012, debounceMs: 140, level: 0, env: 0 },
+    snare: { fLo: 200,  fHi: 3000,  mean: 0.001, last: -999, mult: 1.9, floor: 0.010, debounceMs: 80,  level: 0, env: 0 },
+    perc:  { fLo: 1000, fHi: 5000,  mean: 0.001, last: -999, mult: 1.7, floor: 0.008, debounceMs: 55,  level: 0, env: 0 },
+    hat:   { fLo: 5000, fHi: 12000, mean: 0.001, last: -999, mult: 1.5, floor: 0.006, debounceMs: 38,  level: 0, env: 0 }
+  };
+  const ENV_DECAY = 0.86;          // ~12 frame half-life
+
+  function readAndDetect(now) {
+    if (!audioReady) {
+      // Synthetic 130 BPM carrier — visualize without audio for sanity check
+      const t = now * 0.001;
+      const beat = (t * (130 / 60));
+      const beatPhase = beat - Math.floor(beat);
+      if (beatPhase < 0.04) { inst.kick.env = Math.min(1, inst.kick.env + 0.9); inst.kick.last = now; }
+      const half = (beat * 2) - Math.floor(beat * 2);
+      if (half < 0.04 && Math.floor(beat) % 2 === 1) { inst.snare.env = Math.min(1, inst.snare.env + 0.8); inst.snare.last = now; }
+      const sixteenth = (beat * 4) - Math.floor(beat * 4);
+      if (sixteenth < 0.05) { inst.hat.env = Math.min(1, inst.hat.env + 0.6); inst.hat.last = now; }
+      if (Math.random() < 0.04) { inst.perc.env = Math.min(1, inst.perc.env + 0.5); inst.perc.last = now; }
+      // continuous bass
+      inst.bass.level = 0.35 + 0.20 * (0.5 + 0.5 * Math.sin(t * 0.7));
+      inst.kick.level = inst.kick.env;
+      // decay
+      for (const k in inst) inst[k].env *= ENV_DECAY;
+      return;
+    }
+
+    analyser.getByteFrequencyData(freqBuf);
+    const nbin = freqBuf.length;
+    const hzPerBin = (actx.sampleRate * 0.5) / nbin;
+
+    // Compute per-band flux + level
+    const fluxes = { kick: 0, bass: 0, snare: 0, perc: 0, hat: 0 };
+    const levels = { kick: 0, bass: 0, snare: 0, perc: 0, hat: 0 };
+    const counts = { kick: 0, bass: 0, snare: 0, perc: 0, hat: 0 };
+
+    for (let i = 1; i < nbin; i++) {
+      const hz = i * hzPerBin;
+      const cur = freqBuf[i];
+      const prev = prevFFT[i];
+      const dp = cur > prev ? (cur - prev) / 255 : 0;
+      const a = Math.sqrt(cur / 255);
+      // Each band — note that bands can overlap (kick is subset of bass)
+      for (const k in inst) {
+        const b = inst[k];
+        if (hz >= b.fLo && hz < b.fHi) {
+          fluxes[k] += dp;
+          levels[k] += a;
+          counts[k]++;
+        }
+      }
+      prevFFT[i] = cur;
+    }
+
+    // Normalize + fire onsets
+    for (const k in inst) {
+      const b = inst[k];
+      const fx = counts[k] ? fluxes[k] / counts[k] : 0;
+      const lv = counts[k] ? levels[k] / counts[k] : 0;
+      b.level = b.level * 0.55 + lv * 0.45;
+      const trig = Math.max(b.mean * b.mult, b.floor);
+      if (fx > trig && (now - b.last) > b.debounceMs) {
+        b.last = now;
+        const strength = Math.min(1, (fx - trig) / Math.max(trig, 0.005));
+        b.env = Math.min(1.0, b.env + 0.55 + strength * 0.45);
+      }
+      b.mean = b.mean * 0.92 + fx * 0.08;
+      b.env *= ENV_DECAY;
+    }
+  }
+
+  // ---- visual elements ----
+  // PERC: array of recent perc events (position + age). Drawn as tiny marks.
+  const percMarks = [];   // {x, y, age}
+  const MAX_PERC = 60;
+  // HAT: array of sparks near top/bottom edges
+  const hatSparks = [];   // {x, y, life, life0}
+  const MAX_HAT = 120;
+  // SNARE: a recent-snare-event tracker — a horizontal slash that fades
+  let snareEnv = 0;
+  let lastSnareKey = -1;
+
+  function spawnEffects() {
+    // PERC: when env crosses threshold, add a mark at random angle
+    if (inst.perc.env > 0.40 && performance.now() - (window.__lastPercSpawn || 0) > 50) {
+      window.__lastPercSpawn = performance.now();
+      const ang = Math.random() * Math.PI * 2;
+      const dist = Math.min(W, H) * (0.28 + Math.random() * 0.18);
+      percMarks.push({ x: cx + Math.cos(ang) * dist, y: cy + Math.sin(ang) * dist, age: 0 });
+      if (percMarks.length > MAX_PERC) percMarks.shift();
+    }
+    // HAT: when env spikes, scatter multiple small sparks near top + bottom edges
+    if (inst.hat.env > 0.35 && performance.now() - (window.__lastHatSpawn || 0) > 25) {
+      window.__lastHatSpawn = performance.now();
+      const count = 2 + (Math.random() * 3) | 0;
+      for (let i = 0; i < count; i++) {
+        const topOrBot = Math.random() < 0.5;
+        const x = W * (0.10 + Math.random() * 0.80);
+        const y = topOrBot ? H * (0.08 + Math.random() * 0.10) : H * (0.82 + Math.random() * 0.10);
+        const life0 = 22 + ((Math.random() * 14) | 0);
+        hatSparks.push({ x, y, life: life0, life0 });
+      }
+      while (hatSparks.length > MAX_HAT) hatSparks.shift();
+    }
+    // SNARE env, captured on each fire
+    if (inst.snare.env > snareEnv) snareEnv = inst.snare.env;
+    snareEnv *= 0.90;
+  }
+
+  // ---- render loop ----
+  let frame = 0;
+  let lastTime = performance.now();
+  let fpsEMA = 60;
+
+  const dKick  = document.getElementById('dKick');
+  const dBass  = document.getElementById('dBass');
+  const dSnare = document.getElementById('dSnare');
+  const dPerc  = document.getElementById('dPerc');
+  const dHat   = document.getElementById('dHat');
+  const hudFps = document.getElementById('hudFps');
+
+  function tick(now) {
+    const dt = now - lastTime;
+    lastTime = now;
+    fpsEMA = fpsEMA * 0.92 + (1000 / Math.max(dt, 1)) * 0.08;
+
+    readAndDetect(now);
+    spawnEffects();
+
+    // Background — full clear with ink
+    ctx.fillStyle = '#0a0907';
+    ctx.fillRect(0, 0, W, H);
+
+    // ---- BASS: slow outer ring (continuous level) ----
+    const bassR = Math.min(W, H) * (0.30 + inst.bass.level * 0.05);
+    ctx.beginPath();
+    ctx.arc(cx, cy, bassR, 0, Math.PI * 2);
+    ctx.lineWidth = 1 * DPR + inst.bass.level * 2 * DPR;
+    ctx.strokeStyle = 'rgba(232, 225, 212, ' + (0.15 + inst.bass.level * 0.40).toFixed(3) + ')';
+    ctx.stroke();
+
+    // ---- KICK: central disc that pulses on each hit (env) ----
+    const kickBase = Math.min(W, H) * 0.10;
+    const kickR = kickBase * (1 + inst.kick.env * 1.20);
+    // halo
+    const grad = ctx.createRadialGradient(cx, cy, kickR * 0.5, cx, cy, kickR * 2.4);
+    grad.addColorStop(0, 'rgba(201, 132, 74, ' + (0.30 + inst.kick.env * 0.40).toFixed(3) + ')');
+    grad.addColorStop(0.5, 'rgba(201, 132, 74, ' + (0.10 + inst.kick.env * 0.20).toFixed(3) + ')');
+    grad.addColorStop(1, 'rgba(10, 9, 7, 0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(cx, cy, kickR * 2.4, 0, Math.PI * 2);
+    ctx.fill();
+    // disc
+    ctx.beginPath();
+    ctx.arc(cx, cy, kickR, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(232, 225, 212, ' + (0.50 + inst.kick.env * 0.45).toFixed(3) + ')';
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(cx, cy, kickR, 0, Math.PI * 2);
+    ctx.lineWidth = 1.5 * DPR;
+    ctx.strokeStyle = 'rgba(201, 132, 74, ' + (0.4 + inst.kick.env * 0.5).toFixed(3) + ')';
+    ctx.stroke();
+
+    // ---- SNARE: horizontal slash through centre when env > 0 ----
+    if (snareEnv > 0.03) {
+      const slashLen = Math.min(W, H) * (0.42 + snareEnv * 0.10);
+      const slashHalf = slashLen * 0.5;
+      const slashY = cy;
+      const slashAlpha = Math.min(0.95, snareEnv * 1.4);
+      // soft outer
+      ctx.lineWidth = 3 * DPR + snareEnv * 6 * DPR;
+      ctx.strokeStyle = 'rgba(232, 225, 212, ' + (slashAlpha * 0.18).toFixed(3) + ')';
+      ctx.beginPath();
+      ctx.moveTo(cx - slashHalf, slashY);
+      ctx.lineTo(cx + slashHalf, slashY);
+      ctx.stroke();
+      // sharp inner
+      ctx.lineWidth = 1.0 * DPR;
+      ctx.strokeStyle = 'rgba(232, 225, 212, ' + slashAlpha.toFixed(3) + ')';
+      ctx.beginPath();
+      ctx.moveTo(cx - slashHalf, slashY);
+      ctx.lineTo(cx + slashHalf, slashY);
+      ctx.stroke();
+    }
+
+    // ---- PERC: marks at random angles around the kick, fade out ----
+    for (let i = percMarks.length - 1; i >= 0; i--) {
+      const m = percMarks[i];
+      m.age++;
+      const lifeFrac = 1 - (m.age / 70);
+      if (lifeFrac <= 0) { percMarks.splice(i, 1); continue; }
+      const alpha = lifeFrac * 0.85;
+      const size = 3 * DPR + lifeFrac * 3 * DPR;
+      ctx.fillStyle = 'rgba(148, 136, 118, ' + alpha.toFixed(3) + ')';
+      ctx.beginPath();
+      ctx.arc(m.x, m.y, size, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // ---- HAT: sparks at top + bottom, life-counted dots ----
+    for (let i = hatSparks.length - 1; i >= 0; i--) {
+      const s = hatSparks[i];
+      s.life--;
+      if (s.life <= 0) { hatSparks.splice(i, 1); continue; }
+      const lifeFrac = s.life / s.life0;
+      const alpha = lifeFrac * 0.95;
+      const size = 1.5 * DPR + lifeFrac * 1.5 * DPR;
+      ctx.fillStyle = 'rgba(232, 225, 212, ' + alpha.toFixed(3) + ')';
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, size, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // HUD indicators
+    if ((frame & 3) === 0) {
+      const N = performance.now();
+      dKick.classList.toggle('lit',  N - inst.kick.last  < 120);
+      dBass.classList.toggle('lit',  inst.bass.level > 0.35);
+      dSnare.classList.toggle('lit', N - inst.snare.last < 100);
+      dPerc.classList.toggle('lit',  N - inst.perc.last  < 70);
+      dHat.classList.toggle('lit',   N - inst.hat.last   < 50);
+      hudFps.textContent = fpsEMA.toFixed(0) + 'fps';
+    }
+    if (frame === 0 || frame === 120 || frame % 600 === 0) {
+      console.log('[instruments] frame=' + frame + ' fps=' + fpsEMA.toFixed(0) +
+                  ' audioReady=' + audioReady);
+    }
+    frame++;
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

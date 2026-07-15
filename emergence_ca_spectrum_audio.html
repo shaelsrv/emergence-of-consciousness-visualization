@@ -1,0 +1,533 @@
+<!doctype html>
+<!--
+  emergence machine · visualization
+  substrate:    1D cellular automaton (elementary rule 110) on a frequency-mapped
+                row of cells, scrolled vertically — the screen *is* the
+                automaton's time history.
+  modulation:   audio — every FFT bin's instantaneous energy is injected as a
+                cell intensity at the bin's mapped horizontal position. No
+                onset detection, no debouncing, no smoothing: every loud bin
+                contributes every frame, so every note in the song lights up
+                its column the moment it sounds.
+  mechanism:    each cell at row 0 is set by max(CA propagation from row 1,
+                FFT injection). Rule 110 advances cell states. Rows are
+                shifted downward each frame. Cell intensity fades by 0.96 per
+                row scroll so injection trails decay into background texture.
+  source:       user-loaded WAV via file picker
+  fallback:     scheduled 130 BPM kick + 16th hat pattern drives injections
+                so the substrate is alive without audio.
+  notes:        tokens unchanged. Horizontal axis is log-frequency (low Hz at
+                left, high at right) so the bass kick lives on the far left
+                and hats on the far right — each band has its own visible
+                column and never spatially competes with the others. The
+                fractal triangles you see between injections are rule 110's
+                propagation of leftover energy, NOT decoration; the only
+                thing audio does is set cell values at row 0.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>emergence · 1d cellular automaton · audio</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;1,400&family=JetBrains+Mono:wght@300;400&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ink:        #0a0907;
+    --ink-2:      #14110d;
+    --paper:      #e8e1d4;
+    --paper-dim:  #948876;
+    --ember:      #c9844a;
+    --slate:      #6b8a8f;
+    --rule:       rgba(232, 225, 212, 0.12);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; background: var(--ink); color: var(--paper); font-family: 'Cormorant Garamond', serif; overflow: hidden; }
+  #stage { position: fixed; inset: 0; display: block; background: var(--ink); }
+
+  .hud { position: fixed; font-family: 'JetBrains Mono', monospace; font-weight: 300; font-size: 10px; letter-spacing: 0.24em; text-transform: lowercase; color: var(--paper-dim); pointer-events: none; user-select: none; }
+  .hud.tl { top: 28px; left: 32px; }
+  .hud.tr { top: 28px; right: 32px; text-align: right; }
+  .hud.bl { bottom: 28px; left: 32px; max-width: 50ch; }
+  .hud.br { bottom: 28px; right: 32px; }
+  .hud .rule { display: block; width: 32px; height: 1px; background: var(--rule); margin: 10px 0; }
+  .hud.tr .rule { margin-left: auto; }
+  .hud .k { color: var(--paper-dim); }
+  .hud .v { color: var(--paper); }
+
+  .freq-scale { display: flex; gap: 14px; margin-top: 6px; font-family: 'JetBrains Mono', monospace; font-size: 9px; letter-spacing: 0.24em; color: var(--paper-dim); }
+  .freq-scale span { color: var(--paper); }
+
+  .caption { font-family: 'Cormorant Garamond', serif; font-style: italic; font-weight: 400; font-size: 14px; line-height: 1.55; color: var(--paper-dim); letter-spacing: 0; text-transform: none; }
+  .caption em { color: var(--paper); font-style: italic; }
+
+  #entry { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 28px; background: radial-gradient(ellipse at center, rgba(10,9,7,0.55) 0%, rgba(10,9,7,0.92) 70%); z-index: 10; transition: opacity 1.2s ease, visibility 1.2s ease; }
+  #entry.gone { opacity: 0; visibility: hidden; }
+  #entry .title { font-family: 'Cormorant Garamond', serif; font-weight: 300; font-style: italic; font-size: 38px; color: var(--paper); letter-spacing: 0; text-align: center; max-width: 32ch; line-height: 1.2; }
+  #entry .sub { font-family: 'JetBrains Mono', monospace; font-weight: 300; font-size: 11px; color: var(--paper-dim); letter-spacing: 0.32em; text-transform: lowercase; text-align: center; }
+  #entry label.pick { display: inline-block; cursor: pointer; padding: 14px 26px; border: 1px solid var(--rule); color: var(--paper); font-family: 'JetBrains Mono', monospace; font-weight: 300; font-size: 11px; letter-spacing: 0.32em; text-transform: lowercase; background: transparent; transition: border-color 0.4s ease, color 0.4s ease; }
+  #entry label.pick:hover { border-color: var(--paper); color: var(--ember); }
+  #entry input[type=file] { display: none; }
+  #entry .hint { font-family: 'JetBrains Mono', monospace; font-weight: 300; font-size: 9px; letter-spacing: 0.32em; color: var(--paper-dim); text-transform: lowercase; opacity: 0.65; text-align: center; }
+  #entry .hint code { color: var(--paper); font-family: 'JetBrains Mono', monospace; font-size: 9px; }
+  body.dragging #entry { background: radial-gradient(ellipse at center, rgba(201,132,74,0.10) 0%, rgba(10,9,7,0.94) 70%); }
+  body.dragging #entry label.pick { border-color: var(--ember); color: var(--ember); }
+</style>
+</head>
+<body>
+
+<canvas id="stage"></canvas>
+
+<div class="hud tl">
+  <div><span class="k">substrate</span> &nbsp; <span class="v">1d cellular automaton · rule 110</span></div>
+  <span class="rule"></span>
+  <div><span class="k">cells</span> &nbsp; <span class="v" id="hudW">—</span></div>
+  <div><span class="k">history rows</span> &nbsp; <span class="v" id="hudH">—</span></div>
+  <div><span class="k">steps / frame</span> &nbsp; <span class="v" id="hudSPF">4</span></div>
+</div>
+
+<div class="hud tr">
+  <div><span class="k">modulation</span> &nbsp; <span class="v" id="hudMod">awaiting source</span></div>
+  <span class="rule"></span>
+  <div><span class="k">peak bin amplitude</span> &nbsp; <span class="v" id="hudPeak">0.00</span></div>
+  <div><span class="k">bins injecting</span> &nbsp; <span class="v" id="hudInj">0</span></div>
+</div>
+
+<div class="hud bl">
+  <div class="caption">
+    <em>Substrate</em>: a 1D elementary cellular automaton (rule 110) whose
+    cells are arranged along a log-frequency axis.
+    <em>Local rule</em>: each cell's next state is set by its neighbours and
+    its own state, per a fixed 8-row lookup; the row of cell states is then
+    pushed onto the screen as one new line and the older lines scroll down.
+    The audio sets cell intensities at the top row from the live FFT — every
+    bin every frame. The fractal branching texture below is the rule's
+    propagation of those injections through time.
+  </div>
+  <div class="freq-scale">
+    <div><span>30 Hz</span> · kick</div>
+    <div><span>500 Hz</span> · mid</div>
+    <div><span>3 kHz</span> · perc</div>
+    <div><span>10 kHz</span> · hat</div>
+  </div>
+</div>
+
+<div class="hud br">
+  <div><span class="k">fps</span> &nbsp; <span class="v" id="hudFps">—</span></div>
+</div>
+
+<div id="entry">
+  <div class="title">a rule writes the history. <br>the audio writes the rule's edge.</div>
+  <div class="sub">1d cellular automaton · audio modulation · single-file artifact</div>
+  <label class="pick" for="picker">load audio</label>
+  <input id="picker" type="file" accept="audio/*">
+  <div class="hint">drop a <code>.wav</code> / <code>.mp3</code> anywhere, or click above.<br>without audio a 130 bpm carrier writes the edge.</div>
+</div>
+
+<audio id="audioEl" loop crossorigin="anonymous"></audio>
+
+<script>
+(() => {
+  'use strict';
+
+  /* ============================================================
+     1. canvas + DPR
+     ============================================================ */
+  const canvas = document.getElementById('stage');
+  const dctx = canvas.getContext('2d', { alpha: false });
+  const DPR_CAP = 2;
+
+  let DW = 0, DH = 0;
+  // Substrate cell row width (the CA's spatial axis).
+  // Render history at this width; scale up to display.
+  let CW = 0;    // cells per row
+  let CH = 0;    // history rows (vertical pixels of substrate)
+  // ImageData for the substrate-resolution canvas:
+  let imgCanvas, imgCtx, imgBuf;
+
+  // Cell intensities (per-cell uint8 mapped to LUT)
+  let row     = null;   // current row, Uint8
+  let nextRow = null;   // next row buffer
+
+  // FFT → cell mapping table: for each cell index, the FFT bin range it covers
+  let cellBinStart = null;  // Int32Array
+  let cellBinEnd   = null;  // Int32Array
+  let lastFFTLen = -1;
+
+  // History pixel data (RGB) — stored directly in imgBuf.data, scrolled down each frame.
+  // imgBuf is the offscreen canvas's ImageData.
+
+  function resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, DPR_CAP);
+    DW = Math.floor(window.innerWidth  * dpr);
+    DH = Math.floor(window.innerHeight * dpr);
+    canvas.width = DW; canvas.height = DH;
+    canvas.style.width = window.innerWidth + 'px';
+    canvas.style.height = window.innerHeight + 'px';
+
+    // Aim ~700 cells horizontally, ~540 history rows. Cap budget.
+    CW = Math.min(800, Math.max(400, Math.round(DW / 2)));
+    CH = Math.min(640, Math.max(300, Math.round(DH / 2)));
+
+    row     = new Uint8Array(CW);
+    nextRow = new Uint8Array(CW);
+
+    imgCanvas = document.createElement('canvas');
+    imgCanvas.width = CW; imgCanvas.height = CH;
+    imgCtx = imgCanvas.getContext('2d');
+    imgBuf = imgCtx.createImageData(CW, CH);
+
+    // Zero-fill alpha = 255
+    const d = imgBuf.data;
+    for (let i = 3; i < d.length; i += 4) d[i] = 255;
+
+    document.getElementById('hudW').textContent = CW.toString();
+    document.getElementById('hudH').textContent = CH.toString();
+
+    // Reset cell-to-bin mapping (rebuilt lazily once we know FFT length)
+    cellBinStart = null;
+    cellBinEnd = null;
+    lastFFTLen = -1;
+  }
+
+  /* ============================================================
+     2. cell ↔ frequency mapping (log scale)
+     ============================================================
+     Each cell index i ∈ [0, CW) is mapped to a frequency range. We use
+     log-scale from 30 Hz to 12 kHz so the kick has plenty of room and hats
+     don't compress into one column.
+     ============================================================ */
+  const F_MIN = 30, F_MAX = 12000;
+
+  function buildCellBinMap(nbin, hzPerBin) {
+    cellBinStart = new Int32Array(CW);
+    cellBinEnd   = new Int32Array(CW);
+    const logMin = Math.log(F_MIN), logMax = Math.log(F_MAX);
+    for (let i = 0; i < CW; i++) {
+      const tLo = i / CW;
+      const tHi = (i + 1) / CW;
+      const fLo = Math.exp(logMin + tLo * (logMax - logMin));
+      const fHi = Math.exp(logMin + tHi * (logMax - logMin));
+      let bLo = Math.max(1, Math.floor(fLo / hzPerBin));
+      let bHi = Math.min(nbin - 1, Math.ceil(fHi / hzPerBin));
+      if (bHi <= bLo) bHi = bLo + 1;
+      cellBinStart[i] = bLo;
+      cellBinEnd[i]   = bHi;
+    }
+  }
+
+  /* ============================================================
+     3. rule 110 propagation
+     ============================================================
+     For each cell i, compute boolean alive from neighbours' binary states
+     (intensity >= 128). Then update next-row intensity:
+       if rule says alive:
+         keep at full intensity if injected; otherwise inherit max(L, C, R)
+       if rule says dead:
+         fade
+     This produces a clean fractal propagation that decays unless re-injected.
+     ============================================================ */
+  const RULE = 110;  // 0b01101110 — Turing-complete, visually rich
+
+  function step() {
+    const w = CW;
+    const r = row;
+    const n = nextRow;
+    for (let i = 0; i < w; i++) {
+      const L = r[i === 0 ? w - 1 : i - 1];
+      const C = r[i];
+      const R = r[i === w - 1 ? 0 : i + 1];
+      const pat = ((L >= 128) ? 4 : 0) | ((C >= 128) ? 2 : 0) | ((R >= 128) ? 1 : 0);
+      const alive = (RULE >> pat) & 1;
+      if (alive) {
+        // Carry the brightest local intensity forward, slightly faded
+        let best = L > C ? L : C;
+        if (R > best) best = R;
+        n[i] = (best * 0.97) | 0;
+      } else {
+        n[i] = (C * 0.45) | 0;
+      }
+    }
+    // swap row buffers
+    const tmp = row; row = nextRow; nextRow = tmp;
+  }
+
+  /* ============================================================
+     4. audio injection — every loud FFT bin contributes every frame
+     ============================================================ */
+  let injectionCount = 0;
+  let peakAmp = 0;
+
+  function injectFromFFT(freqBuf, levelBoost) {
+    if (!cellBinStart) return;
+    injectionCount = 0;
+    peakAmp = 0;
+    for (let i = 0; i < CW; i++) {
+      // Take max amplitude in this cell's bin range (peak picking, not averaging,
+      // so a narrow strong note isn't diluted by surrounding silence)
+      let maxA = 0;
+      const lo = cellBinStart[i];
+      const hi = cellBinEnd[i];
+      for (let b = lo; b < hi; b++) {
+        const a = freqBuf[b];
+        if (a > maxA) maxA = a;
+      }
+      const norm = maxA / 255;
+      if (norm > peakAmp) peakAmp = norm;
+      // Compress + scale. Sqrt perceptual + boost so quiet bins still write.
+      const v = Math.sqrt(norm) * 255 * levelBoost;
+      if (v > 24) {           // soft floor
+        injectionCount++;
+        // Overwrite cell only if injection is brighter than current
+        if (v > row[i]) row[i] = v > 255 ? 255 : v;
+      }
+    }
+  }
+
+  function injectSynthBeat(now) {
+    // Without audio: scheduled kicks + 16th hats so the substrate isn't dead
+    if (!synth.started) { synth.started = true; synth.next = now; }
+    if (now >= synth.next) {
+      const beat = synth.beat;
+      // kick (every beat)
+      const kickCellLo = (CW * 0.02) | 0, kickCellHi = (CW * 0.10) | 0;
+      for (let i = kickCellLo; i < kickCellHi; i++) row[i] = 255;
+      // snare on beats 2 & 4
+      if (beat % 2 === 1) {
+        const sLo = (CW * 0.35) | 0, sHi = (CW * 0.42) | 0;
+        for (let i = sLo; i < sHi; i++) row[i] = 220;
+      }
+      synth.beat++;
+      synth.next = now + (60000 / 130) / 4;   // 16th note grid
+    }
+    // hats fire every 16th too
+    if (synth.beat % 2 === 0) {
+      const hLo = (CW * 0.86) | 0, hHi = (CW * 0.92) | 0;
+      for (let i = hLo; i < hHi; i++) row[i] = 200;
+    }
+    // light bin noise so background texture doesn't go fully ink
+    if (Math.random() < 0.15) {
+      const p = (Math.random() * CW) | 0;
+      row[p] = 130;
+    }
+    injectionCount = 12;
+    peakAmp = 0.8;
+  }
+  const synth = { started: false, next: 0, beat: 0 };
+
+  /* ============================================================
+     5. palette LUT
+     ============================================================ */
+  const INK     = [10, 9, 7];
+  const PAPER_D = [148, 136, 118];
+  const PAPER   = [232, 225, 212];
+  const EMBER   = [201, 132, 74];
+
+  const LUT = new Uint8ClampedArray(256 * 4);
+  let lutBuilt = false;
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function buildLUT() {
+    for (let i = 0; i < 256; i++) {
+      const t = i / 255;
+      const tg = Math.pow(t, 0.45);
+      let r, g, bl;
+      if (tg < 0.35) {
+        const k = tg / 0.35;
+        r  = lerp(INK[0], PAPER_D[0], k);
+        g  = lerp(INK[1], PAPER_D[1], k);
+        bl = lerp(INK[2], PAPER_D[2], k);
+      } else if (tg < 0.80) {
+        const k = (tg - 0.35) / 0.45;
+        r  = lerp(PAPER_D[0], PAPER[0], k);
+        g  = lerp(PAPER_D[1], PAPER[1], k);
+        bl = lerp(PAPER_D[2], PAPER[2], k);
+      } else {
+        const k = (tg - 0.80) / 0.20;
+        r  = lerp(PAPER[0], EMBER[0], k);
+        g  = lerp(PAPER[1], EMBER[1], k);
+        bl = lerp(PAPER[2], EMBER[2], k);
+      }
+      const o = i * 4;
+      LUT[o]     = r;
+      LUT[o + 1] = g;
+      LUT[o + 2] = bl;
+      LUT[o + 3] = 255;
+    }
+    lutBuilt = true;
+  }
+
+  /* ============================================================
+     6. history scroll + render
+     ============================================================
+     One sub-step:
+       1) Inject audio into row
+       2) CA rule advances row → row'  (handled in step())
+       3) Scroll imgBuf data DOWN by one row (copyWithin)
+       4) Render the new row at line 0 of imgBuf
+     We do SUBSTEPS sub-steps per frame for visible motion.
+     ============================================================ */
+  const SUBSTEPS = 4;
+
+  function pushRowToHistory(freqBuf, useAudio, now, levelBoost) {
+    if (useAudio) injectFromFFT(freqBuf, levelBoost);
+    else          injectSynthBeat(now);
+    step();        // CA propagates row -> nextRow -> swap
+
+    if (!lutBuilt) buildLUT();
+    const data = imgBuf.data;
+    // Scroll: move rows [0, CH-1) -> [1, CH). Width-in-bytes = CW * 4.
+    const rowBytes = CW * 4;
+    data.copyWithin(rowBytes, 0, rowBytes * (CH - 1));
+    // Write current row into line 0
+    for (let i = 0; i < CW; i++) {
+      const v = row[i];
+      const lo = v * 4;
+      const o = i * 4;
+      data[o]     = LUT[lo];
+      data[o + 1] = LUT[lo + 1];
+      data[o + 2] = LUT[lo + 2];
+      data[o + 3] = 255;
+    }
+  }
+
+  /* ============================================================
+     7. audio source
+     ============================================================ */
+  const audioEl = document.getElementById('audioEl');
+  let actx = null, srcNode = null, analyser = null;
+  let freqBuf = null;
+  let audioReady = false;
+
+  function ensureCtx() {
+    if (actx) return;
+    actx = new (window.AudioContext || window.webkitAudioContext)();
+    srcNode = actx.createMediaElementSource(audioEl);
+    analyser = actx.createAnalyser();
+    analyser.fftSize = 4096;
+    analyser.smoothingTimeConstant = 0.10;
+    srcNode.connect(analyser);
+    analyser.connect(actx.destination);
+    freqBuf = new Uint8Array(analyser.frequencyBinCount);
+
+    if (cellBinStart === null || lastFFTLen !== freqBuf.length) {
+      const hzPerBin = (actx.sampleRate * 0.5) / freqBuf.length;
+      buildCellBinMap(freqBuf.length, hzPerBin);
+      lastFFTLen = freqBuf.length;
+    }
+  }
+
+  function loadFile(file) {
+    if (!file) return;
+    try {
+      const url = URL.createObjectURL(file);
+      audioEl.src = url;
+      audioEl.loop = true;
+      ensureCtx();
+      const p = audioEl.play();
+      if (p && p.then) {
+        p.then(() => {
+          audioReady = true;
+          const nm = file.name.length > 28 ? file.name.slice(0, 26) + '…' : file.name;
+          document.getElementById('hudMod').textContent = 'audio · ' + nm;
+          document.getElementById('entry').classList.add('gone');
+        }).catch(err => {
+          document.getElementById('hudMod').textContent = 'audio · play blocked';
+          console.warn('play() rejected:', err);
+        });
+      }
+    } catch (e) { console.warn(e); }
+  }
+
+  /* ============================================================
+     8. render loop
+     ============================================================ */
+  let frame = 0;
+  let lastTime = performance.now();
+  let fpsEMA = 60;
+
+  const hudFps  = document.getElementById('hudFps');
+  const hudMod  = document.getElementById('hudMod');
+  const hudPeak = document.getElementById('hudPeak');
+  const hudInj  = document.getElementById('hudInj');
+
+  // Boost factor to ensure visible writes even for quiet bins
+  const LEVEL_BOOST = 1.30;
+
+  function tick(now) {
+    const dt = now - lastTime;
+    lastTime = now;
+    fpsEMA = fpsEMA * 0.92 + (1000 / Math.max(dt, 1)) * 0.08;
+
+    const useAudio = audioReady && analyser;
+    if (useAudio) analyser.getByteFrequencyData(freqBuf);
+
+    // SUBSTEPS sub-steps per frame so the history scrolls fast enough to read rhythm
+    for (let s = 0; s < SUBSTEPS; s++) {
+      pushRowToHistory(freqBuf, useAudio, now + s * (dt / SUBSTEPS), LEVEL_BOOST);
+    }
+
+    // Composite to display canvas
+    imgCtx.putImageData(imgBuf, 0, 0);
+    dctx.fillStyle = '#0a0907';
+    dctx.fillRect(0, 0, DW, DH);
+    dctx.imageSmoothingEnabled = true;
+    dctx.imageSmoothingQuality = 'medium';
+    dctx.drawImage(imgCanvas, 0, 0, DW, DH);
+
+    if ((frame & 3) === 0) {
+      hudFps.textContent = fpsEMA.toFixed(0) + 'fps';
+      hudPeak.textContent = peakAmp.toFixed(2);
+      hudInj.textContent = injectionCount.toString();
+      if (!audioReady) {
+        hudMod.textContent = 'autonomous · 130 bpm';
+      } else {
+        const head = hudMod.textContent.split(' · ')[0];
+        hudMod.textContent = head + ' · ' + (audioEl.paused ? 'paused' : 'playing');
+      }
+    }
+    frame++;
+    requestAnimationFrame(tick);
+  }
+
+  /* ============================================================
+     9. UI + file handling
+     ============================================================ */
+  const picker = document.getElementById('picker');
+  picker.addEventListener('change', (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (file) loadFile(file);
+  });
+  ['dragenter', 'dragover'].forEach(ev => {
+    window.addEventListener(ev, (e) => { e.preventDefault(); document.body.classList.add('dragging'); });
+  });
+  ['dragleave', 'drop'].forEach(ev => {
+    window.addEventListener(ev, (e) => { e.preventDefault(); document.body.classList.remove('dragging'); });
+  });
+  window.addEventListener('drop', (e) => {
+    e.preventDefault();
+    const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (file) loadFile(file);
+  });
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'r' || e.key === 'R') {
+      row.fill(0); nextRow.fill(0);
+      const d = imgBuf.data;
+      for (let i = 0; i < d.length; i += 4) {
+        d[i] = 10; d[i+1] = 9; d[i+2] = 7; d[i+3] = 255;
+      }
+    }
+    if (e.code === 'Space' && audioReady) {
+      if (audioEl.paused) audioEl.play(); else audioEl.pause();
+      e.preventDefault();
+    }
+  });
+
+  window.addEventListener('resize', resize);
+  resize();
+  requestAnimationFrame(tick);
+
+})();
+</script>
+</body>
+</html>

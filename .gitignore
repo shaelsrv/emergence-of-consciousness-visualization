@@ -1,0 +1,32 @@
+# Audio source files (private; load via the UI picker at runtime)
+*.wav
+*.mp3
+*.aiff
+*.flac
+*.ogg
+
+# Logo source image (private; processed by sample_logo.py into logo_targets.json)
+logo.png
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+env/
+dist/
+build/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Secrets / environment
+.env
+*.env
+*.key
+*.pem
+*.p12

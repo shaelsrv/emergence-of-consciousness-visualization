@@ -1,0 +1,394 @@
+<!doctype html>
+<!--
+  emergence machine · visualization · tuned to a specific audio track
+  Measured from the WAV itself:
+    BPM 184.6  (beat = 325 ms, 16th = 81 ms)
+    crest factor 5.53
+    BASS (60–250 Hz)   energy 0.011  onsets 22.8/s   (16th-note groove)
+    LOW-MID (250–800)  energy 0.011  onsets 7.4/s    (8th-note pattern)
+    SNARE (200–3000)   energy 0.004  onsets 5.8/s    (quarter-note hits)
+    PERC (1–5 kHz)     energy 0.0012 onsets 11.2/s   (16ths)
+    KICK (40–120)      energy 0.005  onsets 28.6/s   (sub-bass / 32nd texture)
+    HATS               essentially silent — element dropped
+  Thresholds, debounces and visual weights are set from those measurements
+  rather than guessed.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>emergence · tuned · audio</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;1,400&family=JetBrains+Mono:wght@300;400&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ink:        #0a0907;
+    --paper:      #e8e1d4;
+    --paper-dim:  #948876;
+    --ember:      #c9844a;
+    --slate:      #6b8a8f;
+    --rule:       rgba(232, 225, 212, 0.12);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; background: var(--ink); color: var(--paper); font-family: 'Cormorant Garamond', serif; overflow: hidden; }
+  #stage { position: fixed; inset: 0; display: block; background: var(--ink); }
+
+  .hud { position: fixed; font-family: 'JetBrains Mono', monospace; font-weight: 300; font-size: 10px; letter-spacing: 0.24em; text-transform: lowercase; color: var(--paper-dim); pointer-events: none; user-select: none; }
+  .hud.tl { top: 28px; left: 32px; }
+  .hud.br { bottom: 28px; right: 32px; }
+  .hud .v { color: var(--paper); }
+  .hud .row { display: flex; align-items: center; gap: 8px; }
+  .dot { width: 5px; height: 5px; border: 1px solid var(--rule); display: inline-block; transition: background-color 80ms ease, border-color 80ms ease; }
+  .dot.lit { background: var(--paper); border-color: var(--paper); }
+  .dot.lit.kick { background: var(--ember); border-color: var(--ember); }
+
+  #entry { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 28px; background: radial-gradient(ellipse at center, rgba(10,9,7,0.55) 0%, rgba(10,9,7,0.92) 70%); z-index: 10; transition: opacity 1s ease, visibility 1s ease; }
+  #entry.gone { opacity: 0; visibility: hidden; }
+  #entry .title { font-family: 'Cormorant Garamond', serif; font-weight: 300; font-style: italic; font-size: 36px; color: var(--paper); text-align: center; max-width: 30ch; line-height: 1.2; }
+  #entry .sub { font-family: 'JetBrains Mono', monospace; font-weight: 300; font-size: 11px; color: var(--paper-dim); letter-spacing: 0.32em; text-transform: lowercase; text-align: center; }
+  #entry label.pick { display: inline-block; cursor: pointer; padding: 14px 26px; border: 1px solid var(--rule); color: var(--paper); font-family: 'JetBrains Mono', monospace; font-weight: 300; font-size: 11px; letter-spacing: 0.32em; text-transform: lowercase; }
+  #entry label.pick:hover { border-color: var(--paper); color: var(--ember); }
+  #entry input[type=file] { display: none; }
+  #entry .hint { font-family: 'JetBrains Mono', monospace; font-weight: 300; font-size: 9px; letter-spacing: 0.32em; color: var(--paper-dim); text-transform: lowercase; opacity: 0.7; text-align: center; }
+</style>
+</head>
+<body>
+
+<canvas id="stage"></canvas>
+
+<div class="hud tl">
+  <div>tuned · 184 bpm · bass+low-mid track</div>
+  <div style="margin-top:10px;" class="row"><span class="dot kick" id="dKick"></span> <span>kick &nbsp; 40–120 hz</span></div>
+  <div class="row"><span class="dot" id="dBass"></span> <span>bass &nbsp; 60–250 hz</span></div>
+  <div class="row"><span class="dot" id="dLowMid"></span> <span>low-mid &nbsp; 250–800 hz</span></div>
+  <div class="row"><span class="dot" id="dSnare"></span> <span>snare &nbsp; 200–2000 hz</span></div>
+  <div class="row"><span class="dot" id="dPerc"></span> <span>perc &nbsp; 1–5 khz</span></div>
+</div>
+<div class="hud br"><span class="v" id="hudFps">—</span></div>
+
+<div id="entry">
+  <div class="title">tuned to the waveform.</div>
+  <div class="sub">184 bpm · bass + low-mid · no hats</div>
+  <label class="pick" for="picker">load audio</label>
+  <input id="picker" type="file" accept="audio/*">
+  <div class="hint">five visual elements · thresholds set from FFT analysis of this file</div>
+</div>
+
+<audio id="audioEl" loop crossorigin="anonymous"></audio>
+
+<script>
+(() => {
+  'use strict';
+
+  const canvas = document.getElementById('stage');
+  const ctx = canvas.getContext('2d');
+  let W = 0, H = 0, cx = 0, cy = 0;
+  const DPR = Math.min(window.devicePixelRatio || 1, 2);
+
+  function resize() {
+    W = Math.floor(window.innerWidth  * DPR);
+    H = Math.floor(window.innerHeight * DPR);
+    canvas.width = W; canvas.height = H;
+    canvas.style.width = window.innerWidth + 'px';
+    canvas.style.height = window.innerHeight + 'px';
+    cx = W * 0.5; cy = H * 0.5;
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // ---- audio setup ----
+  const audioEl = document.getElementById('audioEl');
+  let actx = null, analyser = null, freqBuf = null, prevFFT = null;
+  let audioReady = false;
+
+  function ensureCtx() {
+    if (actx) return;
+    actx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = actx.createMediaElementSource(audioEl);
+    analyser = actx.createAnalyser();
+    // Match the offline STFT setup: 2048-bin FFT, ~12 ms hop.
+    analyser.fftSize = 2048;
+    analyser.smoothingTimeConstant = 0.0;     // raw transients — we control smoothing
+    src.connect(analyser);
+    analyser.connect(actx.destination);
+    freqBuf = new Uint8Array(analyser.frequencyBinCount);
+    prevFFT = new Uint8Array(analyser.frequencyBinCount);
+  }
+
+  document.getElementById('picker').addEventListener('change', (e) => {
+    const f = e.target.files && e.target.files[0]; if (!f) return;
+    audioEl.src = URL.createObjectURL(f);
+    audioEl.loop = true;
+    ensureCtx();
+    audioEl.play().then(() => {
+      audioReady = true;
+      document.getElementById('entry').classList.add('gone');
+    }).catch(err => console.warn('play() rejected:', err));
+  });
+
+  /* =========================================================
+     Per-instrument bands — thresholds derived from offline
+     spectral-flux median × 2.4 (peak-vs-median ratio that the
+     analysis used). Debounces tuned to 184 BPM subdivisions:
+        beat   = 325 ms       (quarter)
+        eighth = 163 ms
+        16th   = 81 ms
+        32nd   = 41 ms
+     ========================================================= */
+  const inst = {
+    kick:    { fLo: 40,   fHi: 120,  last: -999, mean: 0.001, mult: 2.6, floor: 0.0015, debounceMs: 50,  env: 0, level: 0 },
+    bass:    { fLo: 60,   fHi: 250,  last: -999, mean: 0.001, mult: 2.4, floor: 0.012,  debounceMs: 65,  env: 0, level: 0 },
+    lowMid:  { fLo: 250,  fHi: 800,  last: -999, mean: 0.001, mult: 2.0, floor: 0.080,  debounceMs: 140, env: 0, level: 0 },
+    snare:   { fLo: 200,  fHi: 2000, last: -999, mean: 0.001, mult: 2.1, floor: 0.180,  debounceMs: 250, env: 0, level: 0 },
+    perc:    { fLo: 1000, fHi: 5000, last: -999, mean: 0.001, mult: 1.9, floor: 0.080,  debounceMs: 75,  env: 0, level: 0 }
+  };
+  const ENV_DECAY_FAST = 0.78;   // for fast onsets (kick, bass, perc) — clears between hits
+  const ENV_DECAY_SLOW = 0.86;   // for slower onsets (snare, low-mid) — sustains longer
+
+  function readAndDetect(now) {
+    if (!audioReady) {
+      // Synthetic carrier that mimics the measured BPM + onset rates so we can
+      // see all 5 elements firing before loading audio.
+      const t = now * 0.001;
+      const beatPhase = (t * (184.6 / 60)) % 1;
+      if (beatPhase < 0.02) { inst.snare.env = Math.min(1, inst.snare.env + 0.9); inst.snare.last = now; }
+      const eighth = (t * (184.6 / 60) * 2) % 1;
+      if (eighth < 0.04) { inst.lowMid.env = Math.min(1, inst.lowMid.env + 0.7); inst.lowMid.last = now; }
+      const sixteenth = (t * (184.6 / 60) * 4) % 1;
+      if (sixteenth < 0.06) { inst.bass.env = Math.min(1, inst.bass.env + 0.5); inst.bass.last = now; inst.perc.env = Math.min(1, inst.perc.env + 0.4); inst.perc.last = now; }
+      const thirty2 = (t * (184.6 / 60) * 8) % 1;
+      if (thirty2 < 0.10) { inst.kick.env = Math.min(1, inst.kick.env + 0.35); inst.kick.last = now; }
+      inst.bass.level   = 0.40 + 0.20 * (0.5 + 0.5 * Math.sin(t * 1.5));
+      inst.lowMid.level = 0.30 + 0.15 * (0.5 + 0.5 * Math.sin(t * 0.9));
+      // decay
+      inst.kick.env   *= ENV_DECAY_FAST;
+      inst.bass.env   *= ENV_DECAY_FAST;
+      inst.perc.env   *= ENV_DECAY_FAST;
+      inst.lowMid.env *= ENV_DECAY_SLOW;
+      inst.snare.env  *= ENV_DECAY_SLOW;
+      return;
+    }
+
+    analyser.getByteFrequencyData(freqBuf);
+    const nbin = freqBuf.length;
+    const hzPerBin = (actx.sampleRate * 0.5) / nbin;
+
+    const fluxes = { kick: 0, bass: 0, lowMid: 0, snare: 0, perc: 0 };
+    const levels = { kick: 0, bass: 0, lowMid: 0, snare: 0, perc: 0 };
+    const counts = { kick: 0, bass: 0, lowMid: 0, snare: 0, perc: 0 };
+
+    for (let i = 1; i < nbin; i++) {
+      const hz = i * hzPerBin;
+      const cur = freqBuf[i];
+      const prev = prevFFT[i];
+      const dp = cur > prev ? (cur - prev) / 255 : 0;
+      const a = Math.sqrt(cur / 255);
+      for (const k in inst) {
+        const b = inst[k];
+        if (hz >= b.fLo && hz < b.fHi) {
+          fluxes[k] += dp;
+          levels[k] += a;
+          counts[k]++;
+        }
+      }
+      prevFFT[i] = cur;
+    }
+
+    for (const k in inst) {
+      const b = inst[k];
+      const fx = counts[k] ? fluxes[k] / counts[k] : 0;
+      const lv = counts[k] ? levels[k] / counts[k] : 0;
+      b.level = b.level * 0.55 + lv * 0.45;
+      const trig = Math.max(b.mean * b.mult, b.floor);
+      if (fx > trig && (now - b.last) > b.debounceMs) {
+        b.last = now;
+        const strength = Math.min(1, (fx - trig) / Math.max(trig, 0.005));
+        b.env = Math.min(1.0, b.env + 0.55 + strength * 0.45);
+      }
+      b.mean = b.mean * 0.92 + fx * 0.08;
+    }
+    inst.kick.env   *= ENV_DECAY_FAST;
+    inst.bass.env   *= ENV_DECAY_FAST;
+    inst.perc.env   *= ENV_DECAY_FAST;
+    inst.lowMid.env *= ENV_DECAY_SLOW;
+    inst.snare.env  *= ENV_DECAY_SLOW;
+  }
+
+  /* =========================================================
+     Visual elements — layout chosen for THIS track:
+       BASS is the dominant energy → biggest visual presence
+       LOW-MID equally dominant → second concentric ring
+       KICK adds sub-bass shimmer at centre
+       SNARE = horizontal slash (~5.8 Hz, the slowest, most dramatic)
+       PERC = scattered marks at random angles
+     No hat element.
+     ========================================================= */
+  const percMarks = [];
+  const MAX_PERC = 80;
+  const lowMidParticles = [];   // {ang, dist, life, life0}
+  const MAX_LOWMID = 60;
+  let snareEnv = 0;
+
+  function spawnEffects(now) {
+    // PERC: short-life marks at random angles
+    if (inst.perc.env > 0.45 && now - (window.__lastPercSpawn || 0) > 40) {
+      window.__lastPercSpawn = now;
+      const ang = Math.random() * Math.PI * 2;
+      const dist = Math.min(W, H) * (0.18 + Math.random() * 0.22);
+      percMarks.push({ x: cx + Math.cos(ang) * dist, y: cy + Math.sin(ang) * dist, age: 0, life0: 35 + (Math.random() * 15 | 0) });
+      if (percMarks.length > MAX_PERC) percMarks.shift();
+    }
+    // LOW-MID: filament particles that emanate outward
+    if (inst.lowMid.env > 0.45 && now - (window.__lastLowMidSpawn || 0) > 80) {
+      window.__lastLowMidSpawn = now;
+      const ang = Math.random() * Math.PI * 2;
+      const speed = 0.6 + Math.random() * 0.9;
+      const life0 = 50 + (Math.random() * 30 | 0);
+      lowMidParticles.push({ ang, dist: Math.min(W, H) * 0.08, vDist: speed * DPR, life: life0, life0 });
+      if (lowMidParticles.length > MAX_LOWMID) lowMidParticles.shift();
+    }
+    if (inst.snare.env > snareEnv) snareEnv = inst.snare.env;
+    snareEnv *= 0.92;
+  }
+
+  /* =========================================================
+     Render loop
+     ========================================================= */
+  let frame = 0;
+  let lastTime = performance.now();
+  let fpsEMA = 60;
+
+  const dKick   = document.getElementById('dKick');
+  const dBass   = document.getElementById('dBass');
+  const dLowMid = document.getElementById('dLowMid');
+  const dSnare  = document.getElementById('dSnare');
+  const dPerc   = document.getElementById('dPerc');
+  const hudFps  = document.getElementById('hudFps');
+
+  function tick(now) {
+    const dt = now - lastTime; lastTime = now;
+    fpsEMA = fpsEMA * 0.92 + (1000 / Math.max(dt, 1)) * 0.08;
+
+    readAndDetect(now);
+    spawnEffects(now);
+
+    // background
+    ctx.fillStyle = '#0a0907';
+    ctx.fillRect(0, 0, W, H);
+
+    const baseR = Math.min(W, H);
+
+    // ===================== BASS — outermost ring, biggest =====================
+    // continuous level + onset env both feed the ring
+    const bassR_continuous = baseR * (0.32 + inst.bass.level * 0.04);
+    const bassR = bassR_continuous * (1 + inst.bass.env * 0.18);
+    ctx.beginPath();
+    ctx.arc(cx, cy, bassR, 0, Math.PI * 2);
+    ctx.lineWidth = 2 * DPR + inst.bass.env * 6 * DPR;
+    ctx.strokeStyle = 'rgba(232, 225, 212, ' + (0.20 + inst.bass.level * 0.30 + inst.bass.env * 0.30).toFixed(3) + ')';
+    ctx.stroke();
+
+    // ===================== LOW-MID — concentric ring inside bass =====================
+    const lowMidR = baseR * (0.22 + inst.lowMid.level * 0.05) * (1 + inst.lowMid.env * 0.15);
+    ctx.beginPath();
+    ctx.arc(cx, cy, lowMidR, 0, Math.PI * 2);
+    ctx.lineWidth = 1.5 * DPR + inst.lowMid.env * 4 * DPR;
+    ctx.strokeStyle = 'rgba(148, 136, 118, ' + (0.30 + inst.lowMid.level * 0.30 + inst.lowMid.env * 0.40).toFixed(3) + ')';
+    ctx.stroke();
+
+    // ===================== KICK — central disc with halo =====================
+    const kickBase = baseR * 0.07;
+    const kickR = kickBase * (1 + inst.kick.env * 1.5);
+    // halo
+    const grad = ctx.createRadialGradient(cx, cy, kickR * 0.5, cx, cy, kickR * 3.0);
+    grad.addColorStop(0, 'rgba(201, 132, 74, ' + (0.30 + inst.kick.env * 0.50).toFixed(3) + ')');
+    grad.addColorStop(0.5, 'rgba(201, 132, 74, ' + (0.10 + inst.kick.env * 0.20).toFixed(3) + ')');
+    grad.addColorStop(1, 'rgba(10, 9, 7, 0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(cx, cy, kickR * 3.0, 0, Math.PI * 2);
+    ctx.fill();
+    // disc
+    ctx.beginPath();
+    ctx.arc(cx, cy, kickR, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(232, 225, 212, ' + (0.55 + inst.kick.env * 0.40).toFixed(3) + ')';
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(cx, cy, kickR, 0, Math.PI * 2);
+    ctx.lineWidth = 1.5 * DPR;
+    ctx.strokeStyle = 'rgba(201, 132, 74, ' + (0.4 + inst.kick.env * 0.6).toFixed(3) + ')';
+    ctx.stroke();
+
+    // ===================== SNARE — horizontal slash =====================
+    if (snareEnv > 0.04) {
+      const slashLen = baseR * (0.50 + snareEnv * 0.15);
+      const slashHalf = slashLen * 0.5;
+      const slashAlpha = Math.min(0.95, snareEnv * 1.6);
+      // outer glow
+      ctx.lineWidth = 4 * DPR + snareEnv * 8 * DPR;
+      ctx.strokeStyle = 'rgba(232, 225, 212, ' + (slashAlpha * 0.20).toFixed(3) + ')';
+      ctx.beginPath();
+      ctx.moveTo(cx - slashHalf, cy); ctx.lineTo(cx + slashHalf, cy);
+      ctx.stroke();
+      // sharp center
+      ctx.lineWidth = 1.0 * DPR;
+      ctx.strokeStyle = 'rgba(232, 225, 212, ' + slashAlpha.toFixed(3) + ')';
+      ctx.beginPath();
+      ctx.moveTo(cx - slashHalf, cy); ctx.lineTo(cx + slashHalf, cy);
+      ctx.stroke();
+    }
+
+    // ===================== LOW-MID FILAMENTS — outward-moving particles =====================
+    for (let i = lowMidParticles.length - 1; i >= 0; i--) {
+      const p = lowMidParticles[i];
+      p.life--;
+      p.dist += p.vDist;
+      if (p.life <= 0) { lowMidParticles.splice(i, 1); continue; }
+      const lf = p.life / p.life0;
+      const alpha = lf * 0.7;
+      const size = 1.5 * DPR + lf * 1.5 * DPR;
+      const x = cx + Math.cos(p.ang) * p.dist;
+      const y = cy + Math.sin(p.ang) * p.dist;
+      ctx.fillStyle = 'rgba(148, 136, 118, ' + alpha.toFixed(3) + ')';
+      ctx.beginPath();
+      ctx.arc(x, y, size, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // ===================== PERC — scattered marks =====================
+    for (let i = percMarks.length - 1; i >= 0; i--) {
+      const m = percMarks[i];
+      m.age++;
+      const lf = 1 - (m.age / m.life0);
+      if (lf <= 0) { percMarks.splice(i, 1); continue; }
+      const alpha = lf * 0.85;
+      const size = 2.5 * DPR + lf * 2.5 * DPR;
+      ctx.fillStyle = 'rgba(232, 225, 212, ' + alpha.toFixed(3) + ')';
+      ctx.beginPath();
+      ctx.arc(m.x, m.y, size, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // HUD indicators (every 2 frames since onsets are dense at 184 BPM)
+    if ((frame & 1) === 0) {
+      const N = performance.now();
+      dKick.classList.toggle('lit',   N - inst.kick.last   < 90);
+      dBass.classList.toggle('lit',   N - inst.bass.last   < 90);
+      dLowMid.classList.toggle('lit', N - inst.lowMid.last < 140);
+      dSnare.classList.toggle('lit',  N - inst.snare.last  < 200);
+      dPerc.classList.toggle('lit',   N - inst.perc.last   < 90);
+      hudFps.textContent = fpsEMA.toFixed(0) + 'fps';
+    }
+    if (frame === 0 || frame === 120 || frame % 600 === 0) {
+      console.log('[tuned] frame=' + frame + ' fps=' + fpsEMA.toFixed(0) +
+                  ' audioReady=' + audioReady);
+    }
+    frame++;
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

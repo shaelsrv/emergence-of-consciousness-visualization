@@ -1,0 +1,560 @@
+<!doctype html>
+<!--
+  emergence machine · visualization · particle storm
+  Same scored timeline (every onset pre-extracted from the WAV) but the
+  visual model is a particle field driven by per-band physical forces.
+  Each band is a *force* applied to every particle on every frame in
+  proportion to its envelope:
+    KICK    centre impulse  (brief outward burst from origin)
+    SUB     soft gravity well (pulls particles toward centre)
+    BASS    gravity well (stronger pull; sustained groove)
+    LOW-MID tangential swirl (rotational force, sets the field spinning)
+    SNARE   radial explosion (every particle pushed outward from centre)
+    PERC    micro-jitter (random small displacement per particle)
+    HAT     sideways wind (lateral, alternating direction by hat #)
+  The visible image is the position cloud of the particles under those
+  forces — nothing is drawn directly from the audio.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>emergence · particle storm · audio</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;1,400&family=JetBrains+Mono:wght@300;400&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ink:        #0a0907;
+    --paper:      #e8e1d4;
+    --paper-dim:  #948876;
+    --ember:      #c9844a;
+    --slate:      #6b8a8f;
+    --rule:       rgba(232, 225, 212, 0.12);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; background: var(--ink); color: var(--paper); font-family: 'Cormorant Garamond', serif; overflow: hidden; }
+  #stage { position: fixed; inset: 0; display: block; background: var(--ink); }
+
+  .hud { position: fixed; font-family: 'JetBrains Mono', monospace; font-weight: 300; font-size: 10px; letter-spacing: 0.24em; text-transform: lowercase; color: var(--paper-dim); pointer-events: none; user-select: none; }
+  .hud.tl { top: 28px; left: 32px; }
+  .hud.br { bottom: 28px; right: 32px; }
+  .hud .v { color: var(--paper); }
+  .hud .row { display: flex; align-items: center; gap: 8px; }
+  .dot { width: 5px; height: 5px; border: 1px solid var(--rule); display: inline-block; transition: background-color 80ms ease, border-color 80ms ease; }
+  .dot.lit { background: var(--paper); border-color: var(--paper); }
+  .dot.lit.kick { background: var(--ember); border-color: var(--ember); }
+
+  .timeline {
+    position: fixed; left: 5%; right: 5%; bottom: 16px; height: 1px;
+    background: var(--rule); pointer-events: none;
+  }
+  .timeline > i {
+    position: absolute; top: -2px; width: 1px; height: 5px;
+    background: var(--paper); left: 0%;
+  }
+
+  #entry { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 28px; background: radial-gradient(ellipse at center, rgba(10,9,7,0.55) 0%, rgba(10,9,7,0.92) 70%); z-index: 10; transition: opacity 1s ease, visibility 1s ease; }
+  #entry.gone { opacity: 0; visibility: hidden; }
+  #entry .title { font-family: 'Cormorant Garamond', serif; font-weight: 300; font-style: italic; font-size: 36px; color: var(--paper); text-align: center; max-width: 32ch; line-height: 1.2; }
+  #entry .sub { font-family: 'JetBrains Mono', monospace; font-weight: 300; font-size: 11px; color: var(--paper-dim); letter-spacing: 0.32em; text-transform: lowercase; text-align: center; max-width: 60ch; }
+  #entry .play { display: inline-block; cursor: pointer; padding: 14px 26px; border: 1px solid var(--rule); color: var(--paper); font-family: 'JetBrains Mono', monospace; font-weight: 300; font-size: 11px; letter-spacing: 0.32em; text-transform: lowercase; background: transparent; }
+  #entry .play:hover { border-color: var(--paper); color: var(--ember); }
+  #entry .hint { font-family: 'JetBrains Mono', monospace; font-weight: 300; font-size: 9px; letter-spacing: 0.32em; color: var(--paper-dim); text-transform: lowercase; opacity: 0.7; text-align: center; }
+</style>
+</head>
+<body>
+
+<canvas id="stage"></canvas>
+
+<div class="hud tl">
+  <div>particle storm · scored timeline</div>
+  <div style="margin-top:10px;" class="row"><span class="dot kick" id="dKick"></span> <span>kick · centre impulse</span></div>
+  <div class="row"><span class="dot" id="dSub"></span> <span>sub · gravity well</span></div>
+  <div class="row"><span class="dot" id="dBass"></span> <span>bass · gravity well</span></div>
+  <div class="row"><span class="dot" id="dLowMid"></span> <span>low-mid · swirl</span></div>
+  <div class="row"><span class="dot" id="dSnare"></span> <span>snare · explosion</span></div>
+  <div class="row"><span class="dot" id="dPerc"></span> <span>perc · jitter</span></div>
+  <div class="row"><span class="dot" id="dHat"></span> <span>hat · wind</span></div>
+  <div class="row"><span class="dot kick" id="dBar"></span> <span>bar · downbeat</span></div>
+  <div style="margin-top:10px;"><span id="hudTime">0:00</span> &nbsp; <span class="v" id="hudSection">—</span></div>
+  <div><span id="hudPan">pan 0.00</span></div>
+</div>
+<div class="hud br"><span class="v" id="hudFps">—</span></div>
+
+<div class="timeline"><i id="timelineCursor"></i></div>
+
+<div id="entry">
+  <div class="title">particle storm</div>
+  <div class="sub">each band is a different physical force on the swarm</div>
+  <input id="picker" type="file" accept="audio/*" style="display:none">
+  <label class="play" for="picker">load audio</label>
+  <div class="hint" id="loadStatus">timeline embedded · click to play</div>
+</div>
+
+<audio id="audioEl" loop></audio>
+
+<script>
+(() => {
+  'use strict';
+
+  // ---- canvas ----
+  const canvas = document.getElementById('stage');
+  const ctx = canvas.getContext('2d');
+  let W = 0, H = 0, cx = 0, cy = 0;
+  const DPR = Math.min(window.devicePixelRatio || 1, 2);
+
+  // logo target positions — particles converge to these as the track progresses
+  let logoTargets = null;          // [[x_norm, y_norm], ...] in [-1, +1]
+  let logoTargetsScaledX = null;
+  let logoTargetsScaledY = null;
+  const LOGO_SCALE = 0.36;         // logo fits in central 36% of min(W, H)
+
+  function recomputeLogoTargets() {
+    if (!logoTargets) return;
+    const N = logoTargets.length;
+    if (!logoTargetsScaledX || logoTargetsScaledX.length !== N) {
+      logoTargetsScaledX = new Float32Array(N);
+      logoTargetsScaledY = new Float32Array(N);
+    }
+    const half = Math.min(W, H) * LOGO_SCALE;
+    for (let i = 0; i < N; i++) {
+      logoTargetsScaledX[i] = cx + logoTargets[i][0] * half;
+      logoTargetsScaledY[i] = cy + logoTargets[i][1] * half;
+    }
+  }
+
+  function resize() {
+    W = Math.floor(window.innerWidth  * DPR);
+    H = Math.floor(window.innerHeight * DPR);
+    canvas.width = W; canvas.height = H;
+    canvas.style.width = window.innerWidth + 'px';
+    canvas.style.height = window.innerHeight + 'px';
+    cx = W * 0.5; cy = H * 0.5;
+    recomputeLogoTargets();
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // load logo targets (inline preferred)
+  if (window.__LOGO) {
+    logoTargets = window.__LOGO;
+    recomputeLogoTargets();
+  } else {
+    fetch('logo_targets.json').then(r => r.json()).then(data => {
+      logoTargets = data;
+      recomputeLogoTargets();
+    }).catch(() => { /* no logo file — convergence disabled, audio-only viz */ });
+  }
+
+  // ---- score (loaded inline at end of file or via fetch) ----
+  let score = null;
+  const cursors = {};
+  function applyScore(data) {
+    score = data;
+    for (const band in data.events) cursors[band] = 0;
+    document.getElementById('loadStatus').textContent =
+      'timeline loaded · ' + Object.values(data.events).reduce((s, e) => s + e.length, 0) +
+      ' events · ' + data.duration.toFixed(1) + 's @ ' + data.bpm + ' bpm · click to play';
+  }
+  if (window.__SCORE) {
+    applyScore(window.__SCORE);
+  } else {
+    fetch('track_events.json').then(r => r.json()).then(applyScore).catch(err => {
+      document.getElementById('loadStatus').textContent = 'no timeline (degraded — audio only)';
+      console.warn(err);
+    });
+  }
+
+  // ---- audio ----
+  const audioEl = document.getElementById('audioEl');
+  let audioReady = false;
+  document.getElementById('picker').addEventListener('change', (e) => {
+    const f = e.target.files && e.target.files[0]; if (!f) return;
+    audioEl.src = URL.createObjectURL(f);
+    audioEl.loop = true;
+    audioEl.play().then(() => {
+      audioReady = true;
+      document.getElementById('entry').classList.add('gone');
+      for (const band in cursors) cursors[band] = 0;
+    }).catch(err => console.warn('play() rejected:', err));
+  });
+
+  // ---- per-band envelopes ----
+  const env = { sub:0, kick:0, bass:0, low_mid:0, snare:0, perc:0, hat:0 };
+  const last = { sub:-999, kick:-999, bass:-999, low_mid:-999, snare:-999, perc:-999, hat:-999 };
+  const DECAY = { sub:0.84, kick:0.74, bass:0.84, low_mid:0.88, snare:0.92, perc:0.74, hat:0.78 };
+  const fired = { sub:false, kick:false, bass:false, low_mid:false, snare:false, perc:false, hat:false };
+
+  // ---- bar (downbeat) envelope + cursor ----
+  let barEnv = 0;
+  let barFlash = 0;
+  let nextDownbeat = 0;     // index into score.downbeats
+  let lastDownbeatT = -1;   // for flash timing
+
+  function drainEvents(t) {
+    if (!score) return;
+    for (const k in fired) fired[k] = false;
+    // Reset cursors if user seeked backwards
+    if (audioEl.currentTime < (cursors.__last_t || 0) - 0.5) {
+      for (const band in score.events) {
+        cursors[band] = 0;
+        const list = score.events[band];
+        while (cursors[band] < list.length && list[cursors[band]][0] < t) cursors[band]++;
+      }
+      nextDownbeat = 0;
+      const dbs = score.downbeats || [];
+      while (nextDownbeat < dbs.length && dbs[nextDownbeat] < t) nextDownbeat++;
+    }
+    for (const band in score.events) {
+      const list = score.events[band];
+      let c = cursors[band];
+      while (c < list.length && list[c][0] <= t) {
+        const strength = list[c][1];
+        env[band] = Math.min(1.2, env[band] + 0.55 + strength * 0.45);
+        last[band] = performance.now();
+        fired[band] = true;
+        c++;
+      }
+      cursors[band] = c;
+    }
+    // Drain downbeats — each one fires barEnv (envelope) and barFlash (visual flash)
+    const dbs = score.downbeats || [];
+    while (nextDownbeat < dbs.length && dbs[nextDownbeat] <= t) {
+      barEnv = Math.min(1, barEnv + 0.9);
+      barFlash = 1.0;
+      lastDownbeatT = performance.now();
+      nextDownbeat++;
+    }
+    cursors.__last_t = audioEl.currentTime;
+  }
+
+  // Section lookup — returns index of current section based on currentTime.
+  function getSection(t) {
+    if (!score || !score.sections || score.sections.length < 2) return 0;
+    const s = score.sections;
+    for (let i = 0; i < s.length - 1; i++) if (t < s[i+1]) return i;
+    return s.length - 2;
+  }
+
+  // Per-section physics multipliers ([intro, main, outro] order matching sections[])
+  const SECTION = [
+    { snare: 0.55, bass: 0.65, swirl: 0.50, perc: 0.60, hatWind: 0.40, ambient: 0.85 },
+    { snare: 1.20, bass: 1.10, swirl: 1.20, perc: 1.10, hatWind: 1.00, ambient: 1.00 },
+    { snare: 0.60, bass: 0.55, swirl: 0.35, perc: 0.50, hatWind: 0.30, ambient: 0.70 }
+  ];
+  function sectionMult(idx, key) {
+    const s = SECTION[Math.min(idx, SECTION.length - 1)] || SECTION[0];
+    return s[key];
+  }
+
+  function decayEnvs() {
+    for (const k in env) env[k] *= DECAY[k];
+    barEnv *= 0.86;
+    barFlash *= 0.90;
+  }
+
+  /* =========================================================
+     PARTICLE SYSTEM
+     ========================================================= */
+  const N_PARTICLES = 2200;
+  const px = new Float32Array(N_PARTICLES);
+  const py = new Float32Array(N_PARTICLES);
+  const vx = new Float32Array(N_PARTICLES);
+  const vy = new Float32Array(N_PARTICLES);
+  // Trail: store last 4 positions per particle for motion blur
+  const TRAIL_LEN = 4;
+  const trailX = new Float32Array(N_PARTICLES * TRAIL_LEN);
+  const trailY = new Float32Array(N_PARTICLES * TRAIL_LEN);
+  let trailHead = 0;
+
+  let initialized = false;
+  function initParticles() {
+    for (let i = 0; i < N_PARTICLES; i++) {
+      const ang = (i / N_PARTICLES) * Math.PI * 2 + Math.random() * 0.4;
+      const r = Math.min(W, H) * (0.05 + Math.random() * 0.30);
+      px[i] = cx + Math.cos(ang) * r;
+      py[i] = cy + Math.sin(ang) * r;
+      // small initial tangential velocity so the field is not perfectly static
+      vx[i] = -Math.sin(ang) * 0.4;
+      vy[i] =  Math.cos(ang) * 0.4;
+    }
+    for (let t = 0; t < TRAIL_LEN; t++) {
+      for (let i = 0; i < N_PARTICLES; i++) {
+        trailX[t * N_PARTICLES + i] = px[i];
+        trailY[t * N_PARTICLES + i] = py[i];
+      }
+    }
+    initialized = true;
+  }
+
+  let hatToggle = 0;     // alternates direction for hat wind
+  let snareCount = 0;
+
+  /* Per-frame physics:
+     Each band's envelope contributes a force to every particle.
+     Strength is scaled by env[band] so a hit on the frame it lands is loud,
+     and the next frame is quieter as env decays.
+     A small damping (0.97) prevents explosion. */
+  function stepParticles() {
+    // Section + pan modulation
+    const tNow = audioReady ? audioEl.currentTime : 0;
+    const sec  = Math.floor(tNow);
+    const sIdx = getSection(tNow);
+    const pan  = (score && score.pan_per_sec && sec < score.pan_per_sec.length)
+                  ? score.pan_per_sec[sec] : 0;
+
+    // SUB and BASS: pull toward centre (gravity well) — scaled by section
+    const subPull  = env.sub  * 0.022 * sectionMult(sIdx, 'bass');
+    const bassPull = env.bass * 0.020 * sectionMult(sIdx, 'bass');
+    // LOW-MID swirl: tangential force
+    const swirl    = env.low_mid * 0.020 * sectionMult(sIdx, 'swirl');
+    // SNARE explosion: radial push outward
+    const snareKick = env.snare * 0.095 * sectionMult(sIdx, 'snare');
+    // KICK central impulse — only on the firing frame
+    const kickKick = fired.kick ? 0.060 : 0;
+    // BAR (downbeat) impulse: bigger outward burst on the "1" of every bar
+    const barKick  = barEnv * 0.075;
+    // PERC: small random jitter
+    const percJitter = env.perc * 0.6 * sectionMult(sIdx, 'perc');
+    // HAT: lateral wind, sign alternates per hat event
+    if (fired.hat) hatToggle ^= 1;
+    const windSign = hatToggle ? 1 : -1;
+    const wind = env.hat * 0.55 * windSign * sectionMult(sIdx, 'hatWind');
+    // STEREO PAN: horizontal bias scaled by overall energy
+    const panForceX = pan * 0.025 * (env.bass + env.snare + env.kick);
+
+    // Save trail snapshot (overwrite oldest)
+    const base = trailHead * N_PARTICLES;
+    for (let i = 0; i < N_PARTICLES; i++) {
+      trailX[base + i] = px[i];
+      trailY[base + i] = py[i];
+    }
+    trailHead = (trailHead + 1) % TRAIL_LEN;
+
+    // LOGO ATTRACTION — pulls each particle toward its target position.
+    // Logo is INVISIBLE until the last LOGO_BUILD fraction of the track, then
+    // ramps to full strength. Before that it's pure swarm with no shape bias.
+    const progress = (audioReady && score && score.duration > 0)
+                      ? Math.min(1, audioEl.currentTime / score.duration) : 0;
+    const LOGO_BUILD_START = 0.85;     // 85% of track — last ~33s for a 219s track
+    let logoK = 0;
+    if (logoTargets && progress > LOGO_BUILD_START) {
+      const tt = (progress - LOGO_BUILD_START) / (1 - LOGO_BUILD_START);
+      logoK = Math.pow(tt, 1.3) * 0.045;
+    }
+
+    for (let i = 0; i < N_PARTICLES; i++) {
+      const dx = px[i] - cx;
+      const dy = py[i] - cy;
+      const dist = Math.sqrt(dx * dx + dy * dy) + 1e-3;
+      const nx = dx / dist;
+      const ny = dy / dist;
+
+      // Pulls (toward centre): negative outward = pull
+      vx[i] -= nx * (subPull + bassPull);
+      vy[i] -= ny * (subPull + bassPull);
+
+      // LOGO attraction (only takes effect as progress grows)
+      if (logoK > 0 && i < logoTargetsScaledX.length) {
+        const tx = logoTargetsScaledX[i];
+        const ty = logoTargetsScaledY[i];
+        vx[i] += (tx - px[i]) * logoK;
+        vy[i] += (ty - py[i]) * logoK;
+      }
+
+      // Swirl: tangential is perpendicular to radial
+      vx[i] += -ny * swirl;
+      vy[i] +=  nx * swirl;
+
+      // Outward forces (snare explosion + kick impulse + bar downbeat burst)
+      vx[i] += nx * (snareKick + kickKick + barKick);
+      vy[i] += ny * (snareKick + kickKick + barKick);
+
+      // Pan bias — particles drift toward the channel that's louder
+      vx[i] += panForceX;
+
+      // Per-particle jitter (cheap pseudo-random per-particle)
+      if (percJitter > 0.05) {
+        const j = (Math.sin(i * 12.9898 + performance.now() * 0.001) + 1) * 0.5;
+        const k = (Math.cos(i * 78.233 + performance.now() * 0.001) + 1) * 0.5;
+        vx[i] += (j - 0.5) * percJitter;
+        vy[i] += (k - 0.5) * percJitter;
+      }
+
+      // Wind (lateral)
+      vx[i] += wind;
+
+      // Soft outward limiter — pull back particles that drift too far away
+      const maxR = Math.min(W, H) * 0.55;
+      if (dist > maxR) {
+        vx[i] -= nx * (dist - maxR) * 0.015;
+        vy[i] -= ny * (dist - maxR) * 0.015;
+      }
+
+      // Damping
+      vx[i] *= 0.965;
+      vy[i] *= 0.965;
+
+      // Integrate
+      px[i] += vx[i];
+      py[i] += vy[i];
+    }
+  }
+
+  /* =========================================================
+     RENDER
+     ========================================================= */
+  function render() {
+    // Background — full clear with ink (no trails on the background pass)
+    ctx.fillStyle = '#0a0907';
+    ctx.fillRect(0, 0, W, H);
+
+    // Draw trails as fading line segments from past positions to current.
+    // Iterate from oldest to newest so newer overlay older.
+    for (let t = 0; t < TRAIL_LEN - 1; t++) {
+      const idxA = ((trailHead + t) % TRAIL_LEN) * N_PARTICLES;
+      const idxB = ((trailHead + t + 1) % TRAIL_LEN) * N_PARTICLES;
+      const a = 0.05 + (t / TRAIL_LEN) * 0.18;
+      ctx.strokeStyle = 'rgba(148, 136, 118, ' + a.toFixed(3) + ')';
+      ctx.lineWidth = 1 * DPR;
+      ctx.beginPath();
+      for (let i = 0; i < N_PARTICLES; i++) {
+        ctx.moveTo(trailX[idxA + i], trailY[idxA + i]);
+        ctx.lineTo(trailX[idxB + i], trailY[idxB + i]);
+      }
+      ctx.stroke();
+    }
+    // Current-position trail tip
+    {
+      const last = ((trailHead + TRAIL_LEN - 1) % TRAIL_LEN) * N_PARTICLES;
+      ctx.strokeStyle = 'rgba(232, 225, 212, 0.40)';
+      ctx.lineWidth = 1 * DPR;
+      ctx.beginPath();
+      for (let i = 0; i < N_PARTICLES; i++) {
+        ctx.moveTo(trailX[last + i], trailY[last + i]);
+        ctx.lineTo(px[i], py[i]);
+      }
+      ctx.stroke();
+    }
+
+    // Particle bodies — warm tinting scales with overall energy
+    const warmth = Math.min(1, env.snare + env.kick * 0.6);
+    const tintR = 232 + (201 - 232) * warmth;
+    const tintG = 225 + (132 - 225) * warmth;
+    const tintB = 212 + (74  - 212) * warmth;
+    const tip = 'rgba(' + (tintR | 0) + ',' + (tintG | 0) + ',' + (tintB | 0) + ',';
+
+    ctx.fillStyle = tip + '0.85)';
+    for (let i = 0; i < N_PARTICLES; i++) {
+      ctx.beginPath();
+      ctx.arc(px[i], py[i], 1.2 * DPR, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Central pivot mark (sub gravity well visualisation)
+    if (env.sub > 0.10) {
+      const r = 6 * DPR + env.sub * 12 * DPR;
+      ctx.strokeStyle = 'rgba(107, 138, 143, ' + (0.15 + env.sub * 0.35).toFixed(3) + ')';
+      ctx.lineWidth = 1 * DPR;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    // SNARE flash: brief central burst when env.snare crosses threshold
+    if (env.snare > 0.30) {
+      const a = Math.min(0.8, env.snare * 1.2);
+      const r = 30 * DPR + env.snare * 80 * DPR;
+      const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+      grad.addColorStop(0,   'rgba(232, 225, 212, ' + (a * 0.20).toFixed(3) + ')');
+      grad.addColorStop(0.4, 'rgba(232, 225, 212, ' + (a * 0.05).toFixed(3) + ')');
+      grad.addColorStop(1,   'rgba(10, 9, 7, 0)');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // BAR (downbeat) flash: a hairline ring expanding from centre on every "1"
+    if (barFlash > 0.05) {
+      const a = Math.min(0.9, barFlash * 1.3);
+      const r = Math.min(W, H) * (0.10 + (1 - barFlash) * 0.40);
+      ctx.lineWidth = 1 * DPR + barFlash * 2 * DPR;
+      ctx.strokeStyle = 'rgba(201, 132, 74, ' + (a * 0.55).toFixed(3) + ')';
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+
+  /* =========================================================
+     Render loop — audio-clock driven, no real-time FFT
+     ========================================================= */
+  let frame = 0;
+  let lastTime = performance.now();
+  let fpsEMA = 60;
+
+  const dKick   = document.getElementById('dKick');
+  const dSub    = document.getElementById('dSub');
+  const dBass   = document.getElementById('dBass');
+  const dLowMid = document.getElementById('dLowMid');
+  const dSnare  = document.getElementById('dSnare');
+  const dPerc   = document.getElementById('dPerc');
+  const dHat    = document.getElementById('dHat');
+  const hudTime = document.getElementById('hudTime');
+  const hudSec  = document.getElementById('hudSection');
+  const hudFps  = document.getElementById('hudFps');
+  const tlc     = document.getElementById('timelineCursor');
+
+  function formatTime(t) {
+    const m = Math.floor(t / 60);
+    const s = Math.floor(t - m * 60);
+    return m + ':' + (s < 10 ? '0' : '') + s;
+  }
+
+  function tick(now) {
+    const dt = now - lastTime; lastTime = now;
+    fpsEMA = fpsEMA * 0.92 + (1000 / Math.max(dt, 1)) * 0.08;
+
+    if (!initialized && W > 0) initParticles();
+
+    if (audioReady && score) drainEvents(audioEl.currentTime);
+    stepParticles();
+    render();
+    decayEnvs();
+
+    if ((frame & 1) === 0) {
+      const N = performance.now();
+      dKick.classList.toggle('lit',   N - last.kick    < 80);
+      dSub.classList.toggle('lit',    N - last.sub     < 80);
+      dBass.classList.toggle('lit',   N - last.bass    < 90);
+      dLowMid.classList.toggle('lit', N - last.low_mid < 140);
+      dSnare.classList.toggle('lit',  N - last.snare   < 200);
+      dPerc.classList.toggle('lit',   N - last.perc    < 80);
+      dHat.classList.toggle('lit',    N - last.hat     < 80);
+      const dBar = document.getElementById('dBar');
+      if (dBar) dBar.classList.toggle('lit', N - lastDownbeatT < 140);
+      hudFps.textContent = fpsEMA.toFixed(0) + 'fps';
+      if (audioReady && score) {
+        const t = audioEl.currentTime;
+        hudTime.textContent = formatTime(t);
+        const sIdx = getSection(t);
+        const labels = ['intro', 'main', 'outro'];
+        hudSec.textContent = (labels[sIdx] || 'section ' + sIdx) +
+          ' · ' + (sIdx + 1) + '/' + Math.max(1, (score.sections ? score.sections.length - 1 : 1));
+        const sec = Math.floor(t);
+        const pan = (score.pan_per_sec && sec < score.pan_per_sec.length) ? score.pan_per_sec[sec] : 0;
+        const hp = document.getElementById('hudPan');
+        if (hp) hp.textContent = 'pan ' + (pan >= 0 ? '+' : '') + pan.toFixed(2);
+        tlc.style.left = (t / score.duration * 100).toFixed(2) + '%';
+      }
+    }
+    frame++;
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

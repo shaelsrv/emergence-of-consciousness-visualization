@@ -1,0 +1,506 @@
+<!doctype html>
+<!--
+  emergence machine · visualization
+  substrate:    Driven harmonic lattice — a 2D field where every row is a
+                horizontally-tiled sinusoidal wave whose amplitude is driven
+                by the FFT bin nearest that row's natural frequency. Rows
+                are mapped log-frequency top-to-bottom (top = 30 Hz, bottom
+                = 12 kHz). The wave at each row drifts horizontally at a
+                rate that scales with frequency. A 5-point Laplacian couples
+                neighbouring rows so a strong band leaks energy into adjacent
+                bands and the whole field reads as one membrane, not as
+                stripes.
+  modulation:   audio — the FFT *is* the driving force. For each row y, the
+                amplitude FFT[bin(y)] is added to the row's sine wave every
+                frame. No onset detection, no debouncing, no smoothing
+                between audio and substrate; if a frequency is playing at
+                any amplitude, its row is excited that frame.
+  mechanism:    discrete oscillator field with decay (γ = 0.07/frame),
+                additive driving, and a small isotropic coupling kernel.
+  source:       file-picker WAV
+  fallback:     scheduled synthetic spectrum cycles bands so the lattice
+                breathes autonomously when no audio is loaded.
+  notes:        tokens unchanged. The two accent colours (paper warm /
+                slate cool) mark crest vs trough — this is the substrate's
+                intrinsic ± duality, permitted by §3. Console logs the
+                first frame and every 240th frame so it is trivially
+                verifiable that the render loop is running.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>emergence · driven harmonic lattice · audio</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;1,400&family=JetBrains+Mono:wght@300;400&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ink:        #0a0907;
+    --ink-2:      #14110d;
+    --paper:      #e8e1d4;
+    --paper-dim:  #948876;
+    --ember:      #c9844a;
+    --slate:      #6b8a8f;
+    --rule:       rgba(232, 225, 212, 0.12);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; background: var(--ink); color: var(--paper); font-family: 'Cormorant Garamond', serif; overflow: hidden; }
+  #stage { position: fixed; inset: 0; display: block; background: var(--ink); }
+
+  .hud { position: fixed; font-family: 'JetBrains Mono', monospace; font-weight: 300; font-size: 10px; letter-spacing: 0.24em; text-transform: lowercase; color: var(--paper-dim); pointer-events: none; user-select: none; }
+  .hud.tl { top: 28px; left: 32px; }
+  .hud.tr { top: 28px; right: 32px; text-align: right; }
+  .hud.bl { bottom: 28px; left: 32px; max-width: 50ch; }
+  .hud.br { bottom: 28px; right: 32px; }
+  .hud .rule { display: block; width: 32px; height: 1px; background: var(--rule); margin: 10px 0; }
+  .hud.tr .rule { margin-left: auto; }
+  .hud .k { color: var(--paper-dim); }
+  .hud .v { color: var(--paper); }
+
+  .caption { font-family: 'Cormorant Garamond', serif; font-style: italic; font-weight: 400; font-size: 14px; line-height: 1.55; color: var(--paper-dim); letter-spacing: 0; text-transform: none; }
+  .caption em { color: var(--paper); font-style: italic; }
+
+  /* Frequency-axis annotation along the left edge of the canvas */
+  .fbar { position: fixed; left: 12px; top: 0; bottom: 0; display: flex; flex-direction: column; justify-content: space-between; padding: 6vh 0; pointer-events: none; }
+  .fbar div { font-family: 'JetBrains Mono', monospace; font-size: 9px; letter-spacing: 0.22em; color: var(--paper-dim); }
+  .fbar div span { color: var(--paper); }
+
+  #entry { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 28px; background: radial-gradient(ellipse at center, rgba(10,9,7,0.55) 0%, rgba(10,9,7,0.92) 70%); z-index: 10; transition: opacity 1.2s ease, visibility 1.2s ease; }
+  #entry.gone { opacity: 0; visibility: hidden; }
+  #entry .title { font-family: 'Cormorant Garamond', serif; font-weight: 300; font-style: italic; font-size: 38px; color: var(--paper); letter-spacing: 0; text-align: center; max-width: 32ch; line-height: 1.2; }
+  #entry .sub { font-family: 'JetBrains Mono', monospace; font-weight: 300; font-size: 11px; color: var(--paper-dim); letter-spacing: 0.32em; text-transform: lowercase; text-align: center; }
+  #entry label.pick { display: inline-block; cursor: pointer; padding: 14px 26px; border: 1px solid var(--rule); color: var(--paper); font-family: 'JetBrains Mono', monospace; font-weight: 300; font-size: 11px; letter-spacing: 0.32em; text-transform: lowercase; background: transparent; transition: border-color 0.4s ease, color 0.4s ease; }
+  #entry label.pick:hover { border-color: var(--paper); color: var(--ember); }
+  #entry input[type=file] { display: none; }
+  #entry .hint { font-family: 'JetBrains Mono', monospace; font-weight: 300; font-size: 9px; letter-spacing: 0.32em; color: var(--paper-dim); text-transform: lowercase; opacity: 0.65; text-align: center; }
+  #entry .hint code { color: var(--paper); font-family: 'JetBrains Mono', monospace; font-size: 9px; }
+  body.dragging #entry { background: radial-gradient(ellipse at center, rgba(201,132,74,0.10) 0%, rgba(10,9,7,0.94) 70%); }
+  body.dragging #entry label.pick { border-color: var(--ember); color: var(--ember); }
+</style>
+</head>
+<body>
+
+<canvas id="stage"></canvas>
+
+<!-- frequency axis -->
+<div class="fbar">
+  <div><span>30 Hz</span> · kick</div>
+  <div><span>200 Hz</span></div>
+  <div><span>800 Hz</span> · body</div>
+  <div><span>3 kHz</span> · perc</div>
+  <div><span>12 kHz</span> · hat</div>
+</div>
+
+<div class="hud tl">
+  <div><span class="k">substrate</span> &nbsp; <span class="v">driven harmonic lattice</span></div>
+  <span class="rule"></span>
+  <div><span class="k">grid</span> &nbsp; <span class="v" id="hudGrid">—</span></div>
+  <div><span class="k">decay γ</span> &nbsp; <span class="v">0.07/f</span></div>
+</div>
+
+<div class="hud tr">
+  <div><span class="k">modulation</span> &nbsp; <span class="v" id="hudMod">awaiting source</span></div>
+  <span class="rule"></span>
+  <div><span class="k">peak |u|</span> &nbsp; <span class="v" id="hudPeak">0.00</span></div>
+  <div><span class="k">rms ratio</span> &nbsp; <span class="v" id="hudRMS">0.00</span></div>
+  <div><span class="k">fps</span> &nbsp; <span class="v" id="hudFps">—</span></div>
+</div>
+
+<div class="hud bl">
+  <div class="caption">
+    <em>Substrate</em>: a 2D oscillator lattice. Every row is tuned to a
+    different frequency, log-mapped from kick at top to hat at bottom.
+    <em>Local rule</em>: each row sustains a horizontal sine wave whose
+    amplitude grows when the FFT bin at that row's frequency has energy,
+    decays at 7%/frame otherwise. A small Laplacian coupling lets a strong
+    row leak into its neighbours.
+    The audio is the entire driving term — every bin every frame; the
+    field is the substrate's response to that driving.
+  </div>
+</div>
+
+<div id="entry">
+  <div class="title">every frequency is a string. <br>the audio is the bow.</div>
+  <div class="sub">driven harmonic lattice · audio modulation · single-file artifact</div>
+  <label class="pick" for="picker">load audio</label>
+  <input id="picker" type="file" accept="audio/*">
+  <div class="hint">drop a <code>.wav</code> / <code>.mp3</code> anywhere, or click above.<br>without audio a synthetic spectrum drives the field.</div>
+</div>
+
+<audio id="audioEl" loop crossorigin="anonymous"></audio>
+
+<script>
+(() => {
+  'use strict';
+
+  /* ============================================================
+     1. canvas + substrate
+     ============================================================ */
+  const canvas = document.getElementById('stage');
+  const dctx = canvas.getContext('2d', { alpha: false });
+  const DPR_CAP = 2;
+
+  let DW = 0, DH = 0;
+  // Substrate dims — modest so we can hit 60fps with a Laplacian pass + driving
+  let GW = 0, GH = 0;
+  let u = null, uNext = null;
+  let rowOmega = null;       // visual phase advance rate per row
+  let rowPhase = null;       // accumulated phase per row
+  let rowFFTBin = null;      // FFT bin index per row
+  let rowFFTLo = null;       // FFT bin range per row (max-pick)
+  let rowFFTHi = null;
+
+  let imgCanvas, imgCtx, imgBuf;
+
+  function resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, DPR_CAP);
+    DW = Math.floor(window.innerWidth  * dpr);
+    DH = Math.floor(window.innerHeight * dpr);
+    canvas.width = DW; canvas.height = DH;
+    canvas.style.width = window.innerWidth + 'px';
+    canvas.style.height = window.innerHeight + 'px';
+
+    GW = 480;
+    GH = 270;
+    u     = new Float32Array(GW * GH);
+    uNext = new Float32Array(GW * GH);
+
+    rowOmega   = new Float32Array(GH);
+    rowPhase   = new Float32Array(GH);
+    rowFFTBin  = new Int32Array(GH);
+    rowFFTLo   = new Int32Array(GH);
+    rowFFTHi   = new Int32Array(GH);
+
+    setupRows();
+
+    imgCanvas = document.createElement('canvas');
+    imgCanvas.width = GW; imgCanvas.height = GH;
+    // Attach to DOM (hidden) — sidesteps any detached-canvas quirks
+    imgCanvas.style.display = 'none';
+    document.body.appendChild(imgCanvas);
+    imgCtx = imgCanvas.getContext('2d', { alpha: false });
+    imgBuf = imgCtx.createImageData(GW, GH);
+    // initialise alpha
+    for (let i = 3; i < imgBuf.data.length; i += 4) imgBuf.data[i] = 255;
+
+    document.getElementById('hudGrid').textContent = GW + '×' + GH;
+  }
+
+  /* ============================================================
+     2. row frequency mapping
+     ============================================================ */
+  const F_MIN = 30, F_MAX = 12000;
+  function setupRows() {
+    const logMin = Math.log(F_MIN), logMax = Math.log(F_MAX);
+    for (let y = 0; y < GH; y++) {
+      const t = y / (GH - 1);
+      const f = Math.exp(logMin + t * (logMax - logMin));
+      // visual phase rate: low freq drifts slow, high freq fast — gives parallax
+      rowOmega[y] = 0.02 + Math.pow(t, 0.7) * 0.22;
+    }
+  }
+  // Cell-binning for FFT happens after we know the analyser's sampleRate/binSize.
+  function buildFFTMap(nbin, hzPerBin) {
+    const logMin = Math.log(F_MIN), logMax = Math.log(F_MAX);
+    for (let y = 0; y < GH; y++) {
+      const tLo = (y - 0.5) / (GH - 1);
+      const tHi = (y + 0.5) / (GH - 1);
+      const fLo = Math.exp(logMin + Math.max(0, tLo) * (logMax - logMin));
+      const fHi = Math.exp(logMin + Math.min(1, tHi) * (logMax - logMin));
+      let bLo = Math.max(1, Math.floor(fLo / hzPerBin));
+      let bHi = Math.min(nbin - 1, Math.ceil(fHi / hzPerBin));
+      if (bHi <= bLo) bHi = bLo + 1;
+      rowFFTLo[y] = bLo;
+      rowFFTHi[y] = bHi;
+      rowFFTBin[y] = (bLo + bHi) >> 1;
+    }
+  }
+
+  /* ============================================================
+     3. substrate step — drive + decay + couple
+     ============================================================
+     For each row y:
+       phase[y] += omega[y]
+       amp = peak FFT bin amplitude in row's range (perceptual sqrt)
+       for each x:
+         u[i] += amp * sin(2π·x / λ + phase[y])
+     Then decay: u *= 0.93
+     Then Laplacian smoothing: u' = u + κ ∇²u   (5-point stencil)
+     ============================================================ */
+  const WAVELENGTH = 38;                              // cells per cycle of the row wave
+  const TWO_PI_OVER_LAMBDA = (2 * Math.PI) / WAVELENGTH;
+  const DECAY = 0.93;
+  const COUPLE_K = 0.045;
+
+  let peakAbsU = 0;
+  let energySum = 0;
+
+  function step(freqBuf, useAudio, synthT) {
+    // ---- 1) drive each row from FFT ----
+    for (let y = 0; y < GH; y++) {
+      rowPhase[y] += rowOmega[y];
+      let amp;
+      if (useAudio) {
+        // peak amplitude in this row's FFT bin range, sqrt-compressed
+        let maxA = 0;
+        const lo = rowFFTLo[y], hi = rowFFTHi[y];
+        for (let b = lo; b < hi; b++) {
+          const a = freqBuf[b];
+          if (a > maxA) maxA = a;
+        }
+        amp = Math.sqrt(maxA / 255) * 1.6;     // perceptual + boost
+      } else {
+        // synthetic: per-band sines with a 130 BPM kick on the top row
+        const beat = (synthT * (130 / 60));
+        const beatPulse = beat - Math.floor(beat) < 0.10 ? 1 : 0;
+        const tf = y / (GH - 1);
+        amp = 0.25 + 0.35 * Math.abs(Math.sin(synthT * (1 + tf * 4)))
+                  + (tf < 0.10 ? beatPulse * 1.2 : 0)
+                  + (tf > 0.85 ? (Math.random() < 0.18 ? 0.9 : 0) : 0);
+      }
+      if (amp < 0.04) continue;                 // skip near-silent rows
+
+      const yc = y * GW;
+      const phase = rowPhase[y];
+      // Drive: distribute amplitude across the row as a sine
+      for (let x = 0; x < GW; x++) {
+        u[yc + x] += amp * Math.sin(TWO_PI_OVER_LAMBDA * x + phase);
+      }
+    }
+
+    // ---- 2) Laplacian smoothing (uNext) + decay ----
+    const w = GW, h = GH;
+    for (let y = 1; y < h - 1; y++) {
+      const yc = y * w;
+      const ym = (y - 1) * w;
+      const yp = (y + 1) * w;
+      for (let x = 1; x < w - 1; x++) {
+        const i = yc + x;
+        const lap = u[ym + x] + u[yp + x] + u[yc + x - 1] + u[yc + x + 1] - 4 * u[i];
+        uNext[i] = (u[i] + COUPLE_K * lap) * DECAY;
+      }
+    }
+    // boundary rows/cols just decay (no neighbour available)
+    for (let x = 0; x < w; x++) {
+      uNext[x]              = u[x]              * DECAY * 0.96;
+      uNext[(h - 1) * w + x] = u[(h - 1) * w + x] * DECAY * 0.96;
+    }
+    for (let y = 0; y < h; y++) {
+      uNext[y * w]            = u[y * w]            * DECAY * 0.96;
+      uNext[y * w + (w - 1)]  = u[y * w + (w - 1)]  * DECAY * 0.96;
+    }
+
+    // swap
+    const tmp = u; u = uNext; uNext = tmp;
+  }
+
+  /* ============================================================
+     4. palette LUT — bipolar (crest warm / trough cool)
+     ============================================================ */
+  const INK     = [10, 9, 7];
+  const PAPER_D = [148, 136, 118];
+  const PAPER   = [232, 225, 212];
+  const EMBER   = [201, 132, 74];
+  const SLATE   = [107, 138, 143];
+
+  const LUT_POS = new Uint8ClampedArray(64 * 4);
+  const LUT_NEG = new Uint8ClampedArray(64 * 4);
+  let lutBuilt = false;
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function buildLUT() {
+    function fill(arr, TOP) {
+      for (let i = 0; i < 64; i++) {
+        const t = i / 63;
+        const tg = Math.pow(t, 0.42);
+        let r, g, bl;
+        if (tg < 0.35) {
+          const k = tg / 0.35;
+          r  = lerp(INK[0], PAPER_D[0], k);
+          g  = lerp(INK[1], PAPER_D[1], k);
+          bl = lerp(INK[2], PAPER_D[2], k);
+        } else if (tg < 0.80) {
+          const k = (tg - 0.35) / 0.45;
+          r  = lerp(PAPER_D[0], PAPER[0], k);
+          g  = lerp(PAPER_D[1], PAPER[1], k);
+          bl = lerp(PAPER_D[2], PAPER[2], k);
+        } else {
+          const k = (tg - 0.80) / 0.20;
+          r  = lerp(PAPER[0], TOP[0], k);
+          g  = lerp(PAPER[1], TOP[1], k);
+          bl = lerp(PAPER[2], TOP[2], k);
+        }
+        const o = i * 4;
+        arr[o] = r; arr[o + 1] = g; arr[o + 2] = bl; arr[o + 3] = 255;
+      }
+    }
+    fill(LUT_POS, EMBER);
+    fill(LUT_NEG, SLATE);
+    lutBuilt = true;
+  }
+
+  // auto-exposure: track running peak so LUT scale adapts
+  let expoScale = 1.0;
+  function paint() {
+    if (!lutBuilt) buildLUT();
+    // 1st pass: compute peak |u| (stride sample)
+    let pk = 1e-4, sumSq = 0;
+    const n = GW * GH;
+    for (let i = 0; i < n; i += 37) {
+      const v = u[i];
+      const av = v < 0 ? -v : v;
+      if (av > pk) pk = av;
+      sumSq += v * v;
+    }
+    peakAbsU = pk;
+    energySum = Math.sqrt(sumSq / (n / 37));
+    // ema toward 1/peak so brightest cells reach LUT top
+    const target = 1 / Math.max(pk, 0.4);
+    expoScale = expoScale * 0.92 + target * 0.08;
+
+    const data = imgBuf.data;
+    for (let i = 0; i < n; i++) {
+      const v = u[i];
+      const av = v < 0 ? -v : v;
+      let mi = (av * expoScale * 63) | 0;
+      if (mi > 63) mi = 63;
+      const lut = v >= 0 ? LUT_POS : LUT_NEG;
+      const lo = mi * 4;
+      const o = i * 4;
+      data[o]     = lut[lo];
+      data[o + 1] = lut[lo + 1];
+      data[o + 2] = lut[lo + 2];
+      data[o + 3] = 255;
+    }
+    imgCtx.putImageData(imgBuf, 0, 0);
+    dctx.fillStyle = '#0a0907';
+    dctx.fillRect(0, 0, DW, DH);
+    dctx.imageSmoothingEnabled = true;
+    dctx.imageSmoothingQuality = 'high';
+    dctx.drawImage(imgCanvas, 0, 0, DW, DH);
+  }
+
+  /* ============================================================
+     5. audio
+     ============================================================ */
+  const audioEl = document.getElementById('audioEl');
+  let actx = null, srcNode = null, analyser = null;
+  let freqBuf = null;
+  let audioReady = false;
+  let fftMapBuilt = false;
+
+  function ensureCtx() {
+    if (actx) return;
+    actx = new (window.AudioContext || window.webkitAudioContext)();
+    srcNode = actx.createMediaElementSource(audioEl);
+    analyser = actx.createAnalyser();
+    analyser.fftSize = 4096;
+    analyser.smoothingTimeConstant = 0.10;
+    srcNode.connect(analyser);
+    analyser.connect(actx.destination);
+    freqBuf = new Uint8Array(analyser.frequencyBinCount);
+
+    const hzPerBin = (actx.sampleRate * 0.5) / freqBuf.length;
+    buildFFTMap(freqBuf.length, hzPerBin);
+    fftMapBuilt = true;
+  }
+
+  function loadFile(file) {
+    if (!file) return;
+    try {
+      const url = URL.createObjectURL(file);
+      audioEl.src = url;
+      audioEl.loop = true;
+      ensureCtx();
+      const p = audioEl.play();
+      if (p && p.then) {
+        p.then(() => {
+          audioReady = true;
+          const nm = file.name.length > 28 ? file.name.slice(0, 26) + '…' : file.name;
+          document.getElementById('hudMod').textContent = 'audio · ' + nm;
+          document.getElementById('entry').classList.add('gone');
+        }).catch(err => {
+          document.getElementById('hudMod').textContent = 'audio · play blocked';
+          console.warn('play() rejected:', err);
+        });
+      }
+    } catch (e) { console.warn(e); }
+  }
+
+  /* ============================================================
+     6. render loop
+     ============================================================ */
+  let frame = 0;
+  let lastTime = performance.now();
+  let fpsEMA = 60;
+
+  const hudFps  = document.getElementById('hudFps');
+  const hudMod  = document.getElementById('hudMod');
+  const hudPeak = document.getElementById('hudPeak');
+  const hudRMS  = document.getElementById('hudRMS');
+
+  function tick(now) {
+    const dt = now - lastTime;
+    lastTime = now;
+    fpsEMA = fpsEMA * 0.92 + (1000 / Math.max(dt, 1)) * 0.08;
+
+    const useAudio = audioReady && analyser && fftMapBuilt;
+    if (useAudio) analyser.getByteFrequencyData(freqBuf);
+
+    step(freqBuf, useAudio, now * 0.001);
+    paint();
+
+    if ((frame & 3) === 0) {
+      hudFps.textContent  = fpsEMA.toFixed(0) + 'fps';
+      hudPeak.textContent = peakAbsU.toFixed(2);
+      hudRMS.textContent  = energySum.toFixed(2);
+      if (!audioReady) {
+        hudMod.textContent = 'autonomous · synthetic spectrum';
+      } else {
+        const head = hudMod.textContent.split(' · ')[0];
+        hudMod.textContent = head + ' · ' + (audioEl.paused ? 'paused' : 'playing');
+      }
+    }
+    if (frame === 0 || frame === 60 || frame % 600 === 0) {
+      console.log('[lattice] frame=' + frame + ' fps=' + fpsEMA.toFixed(0) +
+                  ' peakU=' + peakAbsU.toFixed(2) + ' useAudio=' + useAudio);
+    }
+    frame++;
+    requestAnimationFrame(tick);
+  }
+
+  /* ============================================================
+     7. UI
+     ============================================================ */
+  const picker = document.getElementById('picker');
+  picker.addEventListener('change', (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (file) loadFile(file);
+  });
+  ['dragenter', 'dragover'].forEach(ev => {
+    window.addEventListener(ev, (e) => { e.preventDefault(); document.body.classList.add('dragging'); });
+  });
+  ['dragleave', 'drop'].forEach(ev => {
+    window.addEventListener(ev, (e) => { e.preventDefault(); document.body.classList.remove('dragging'); });
+  });
+  window.addEventListener('drop', (e) => {
+    e.preventDefault();
+    const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (file) loadFile(file);
+  });
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'r' || e.key === 'R') { u.fill(0); uNext.fill(0); }
+    if (e.code === 'Space' && audioReady) {
+      if (audioEl.paused) audioEl.play(); else audioEl.pause();
+      e.preventDefault();
+    }
+  });
+
+  window.addEventListener('resize', resize);
+  resize();
+  requestAnimationFrame(tick);
+
+})();
+</script>
+</body>
+</html>

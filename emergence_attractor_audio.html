@@ -1,0 +1,596 @@
+<!doctype html>
+<!--
+  emergence machine · visualization
+  substrate:    Strange attractor (De Jong map) iterated on an 80k-particle ensemble
+                  x' = sin(a · y) − cos(b · x)
+                  y' = sin(c · x) − cos(d · y)
+                Each particle advances one step per frame; positions accumulate
+                into a density buffer with slow decay.
+  modulation:   audio — continuous band levels offset (a, b, c, d) around a
+                base setting; per-band spectral-flux onsets push transient
+                ~165 ms jumps into one parameter each (kick→a, mid→b, hat→c+d).
+                The four parameters define the attractor's *shape*; modulating
+                them is modulating which orbit the substrate is on, not
+                drawing anything.
+  mechanism:    iterated map on a particle cloud + density-buffer accumulation
+                with frame-to-frame decay (~0.90).
+  source:       user-loaded WAV via file picker.
+  fallback:     scheduled 4/4 carrier at 130 BPM modulates the parameters so
+                the attractor breathes autonomously when no audio is loaded.
+  notes:        tokens unchanged. Single ember accent for the densest tips of
+                the filigree. Why this substrate matches techno where slower
+                ones did not: every frame is a *full new image* of the
+                attractor under the current parameter setting — there is no
+                lag between an audio event and the corresponding shift, because
+                the substrate has no memory beyond the previous frame's
+                density. Smaller notes are visible because every particle
+                responds to every parameter change simultaneously; the
+                resulting filigree shimmers wherever the orbit was sensitive.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>emergence · strange attractor · audio</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;1,400&family=JetBrains+Mono:wght@300;400&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ink:        #0a0907;
+    --ink-2:      #14110d;
+    --paper:      #e8e1d4;
+    --paper-dim:  #948876;
+    --ember:      #c9844a;
+    --slate:      #6b8a8f;
+    --rule:       rgba(232, 225, 212, 0.12);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; background: var(--ink); color: var(--paper); font-family: 'Cormorant Garamond', serif; overflow: hidden; }
+  #stage { position: fixed; inset: 0; display: block; background: var(--ink); }
+
+  .hud { position: fixed; font-family: 'JetBrains Mono', monospace; font-weight: 300; font-size: 10px; letter-spacing: 0.24em; text-transform: lowercase; color: var(--paper-dim); pointer-events: none; user-select: none; }
+  .hud.tl { top: 28px; left: 32px; }
+  .hud.tr { top: 28px; right: 32px; text-align: right; }
+  .hud.bl { bottom: 28px; left: 32px; max-width: 50ch; }
+  .hud.br { bottom: 28px; right: 32px; }
+  .hud .rule { display: block; width: 32px; height: 1px; background: var(--rule); margin: 10px 0; }
+  .hud.tr .rule { margin-left: auto; }
+  .hud .k { color: var(--paper-dim); }
+  .hud .v { color: var(--paper); }
+
+  .onsets { margin-top: 10px; display: flex; gap: 14px; align-items: center; }
+  .onsets .dot { width: 4px; height: 4px; border: 1px solid var(--rule); transition: background-color 80ms ease, border-color 80ms ease; }
+  .onsets .dot.lit { background: var(--paper); border-color: var(--paper); }
+  .onsets .dot.kick.lit { background: var(--ember); border-color: var(--ember); }
+  .onsets label { font-size: 9px; letter-spacing: 0.28em; color: var(--paper-dim); }
+
+  /* parameter readout — four hairline scales for a, b, c, d */
+  .params { margin-top: 10px; display: flex; flex-direction: column; gap: 4px; }
+  .params .row { display: flex; align-items: center; gap: 8px; font-size: 9px; letter-spacing: 0.24em; }
+  .params .lbl { width: 8px; color: var(--paper-dim); }
+  .params .bar { position: relative; width: 120px; height: 1px; background: var(--rule); }
+  .params .bar > i { position: absolute; top: -3px; width: 1px; height: 7px; background: var(--paper); transition: left 80ms linear; }
+  .params .val { color: var(--paper); font-size: 9px; width: 5ch; text-align: right; }
+
+  .caption { font-family: 'Cormorant Garamond', serif; font-style: italic; font-weight: 400; font-size: 14px; line-height: 1.55; color: var(--paper-dim); letter-spacing: 0; text-transform: none; }
+  .caption em { color: var(--paper); font-style: italic; }
+
+  #entry { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 28px; background: radial-gradient(ellipse at center, rgba(10,9,7,0.55) 0%, rgba(10,9,7,0.92) 70%); z-index: 10; transition: opacity 1.2s ease, visibility 1.2s ease; }
+  #entry.gone { opacity: 0; visibility: hidden; }
+  #entry .title { font-family: 'Cormorant Garamond', serif; font-weight: 300; font-style: italic; font-size: 38px; color: var(--paper); letter-spacing: 0; text-align: center; max-width: 32ch; line-height: 1.2; }
+  #entry .sub { font-family: 'JetBrains Mono', monospace; font-weight: 300; font-size: 11px; color: var(--paper-dim); letter-spacing: 0.32em; text-transform: lowercase; text-align: center; }
+  #entry label.pick { display: inline-block; cursor: pointer; padding: 14px 26px; border: 1px solid var(--rule); color: var(--paper); font-family: 'JetBrains Mono', monospace; font-weight: 300; font-size: 11px; letter-spacing: 0.32em; text-transform: lowercase; background: transparent; transition: border-color 0.4s ease, color 0.4s ease; }
+  #entry label.pick:hover { border-color: var(--paper); color: var(--ember); }
+  #entry input[type=file] { display: none; }
+  #entry .hint { font-family: 'JetBrains Mono', monospace; font-weight: 300; font-size: 9px; letter-spacing: 0.32em; color: var(--paper-dim); text-transform: lowercase; opacity: 0.65; text-align: center; }
+  #entry .hint code { color: var(--paper); font-family: 'JetBrains Mono', monospace; font-size: 9px; }
+  body.dragging #entry { background: radial-gradient(ellipse at center, rgba(201,132,74,0.10) 0%, rgba(10,9,7,0.94) 70%); }
+  body.dragging #entry label.pick { border-color: var(--ember); color: var(--ember); }
+</style>
+</head>
+<body>
+
+<canvas id="stage"></canvas>
+
+<div class="hud tl">
+  <div><span class="k">substrate</span> &nbsp; <span class="v">strange attractor (de jong map)</span></div>
+  <span class="rule"></span>
+  <div><span class="k">particles</span> &nbsp; <span class="v" id="hudN">—</span></div>
+  <div><span class="k">density buffer</span> &nbsp; <span class="v" id="hudGrid">—</span></div>
+  <div class="onsets">
+    <div><span class="dot kick" id="dKick"></span> &nbsp;<label>kick</label></div>
+    <div><span class="dot" id="dSnare"></span> &nbsp;<label>mid</label></div>
+    <div><span class="dot" id="dHat"></span> &nbsp;<label>hat</label></div>
+  </div>
+</div>
+
+<div class="hud tr">
+  <div><span class="k">modulation</span> &nbsp; <span class="v" id="hudMod">awaiting source</span></div>
+  <span class="rule"></span>
+  <div class="params">
+    <div class="row"><span class="lbl">a</span><span class="bar"><i id="pA"></i></span><span class="val" id="vA">—</span></div>
+    <div class="row"><span class="lbl">b</span><span class="bar"><i id="pB"></i></span><span class="val" id="vB">—</span></div>
+    <div class="row"><span class="lbl">c</span><span class="bar"><i id="pC"></i></span><span class="val" id="vC">—</span></div>
+    <div class="row"><span class="lbl">d</span><span class="bar"><i id="pD"></i></span><span class="val" id="vD">—</span></div>
+  </div>
+</div>
+
+<div class="hud bl">
+  <div class="caption">
+    <em>Substrate</em>: a strange attractor (De Jong map) iterated on a cloud
+    of <span id="capN">80k</span> particles.
+    <em>Local rule</em>: each particle advances one step of the recurrence per
+    frame; its position accumulates into a density buffer that decays.
+    The visible filigree is the orbit distribution of the map under the
+    current four parameters — audio modulates those four numbers, and the
+    attractor reshapes for every beat.
+  </div>
+</div>
+
+<div class="hud br">
+  <div><span class="k">fps</span> &nbsp; <span class="v" id="hudFps">—</span></div>
+</div>
+
+<div id="entry">
+  <div class="title">the pattern is the orbit. <br>change the orbit, change the pattern.</div>
+  <div class="sub">strange attractor · audio modulation · single-file artifact</div>
+  <label class="pick" for="picker">load audio</label>
+  <input id="picker" type="file" accept="audio/*">
+  <div class="hint">drop a <code>.wav</code> / <code>.mp3</code> anywhere, or click above.<br>without audio the parameters cycle on a 130 bpm carrier.</div>
+</div>
+
+<audio id="audioEl" loop crossorigin="anonymous"></audio>
+
+<script>
+(() => {
+  'use strict';
+
+  /* ============================================================
+     1. canvas + DPR + substrate buffer
+     ============================================================ */
+  const canvas = document.getElementById('stage');
+  const dctx = canvas.getContext('2d', { alpha: false });
+  const DPR_CAP = 2;
+
+  let DW = 0, DH = 0;
+  let GW = 0, GH = 0;
+  let density = null;       // Float32Array: accumulated particle density
+  let imgCanvas, imgCtx, imgBuf;
+
+  function resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, DPR_CAP);
+    DW = Math.floor(window.innerWidth  * dpr);
+    DH = Math.floor(window.innerHeight * dpr);
+    canvas.width = DW; canvas.height = DH;
+    canvas.style.width = window.innerWidth + 'px';
+    canvas.style.height = window.innerHeight + 'px';
+
+    // Density buffer at ~half display res, capped for budget
+    const aspect = DW / DH;
+    GH = 540;
+    GW = Math.round(GH * aspect);
+    if (GW * GH > 700000) {
+      GH = Math.round(Math.sqrt(700000 / aspect));
+      GW = Math.round(GH * aspect);
+    }
+    density = new Float32Array(GW * GH);
+
+    imgCanvas = document.createElement('canvas');
+    imgCanvas.width = GW; imgCanvas.height = GH;
+    imgCtx = imgCanvas.getContext('2d');
+    imgBuf = imgCtx.createImageData(GW, GH);
+
+    document.getElementById('hudGrid').textContent = GW + '×' + GH;
+  }
+
+  /* ============================================================
+     2. particle ensemble
+     ============================================================ */
+  const N = 80000;
+  const px = new Float32Array(N);
+  const py = new Float32Array(N);
+
+  function seedParticles() {
+    for (let i = 0; i < N; i++) {
+      px[i] = (Math.random() * 4 - 2);   // initial random in [-2, 2]
+      py[i] = (Math.random() * 4 - 2);
+    }
+  }
+
+  /* ============================================================
+     3. iterated map step + density accumulation
+     ============================================================
+     De Jong:
+       x' = sin(a·y) − cos(b·x)
+       y' = sin(c·x) − cos(d·y)
+     Outputs always lie in [-2, 2]. We map to density-buffer pixel coords.
+     Per-particle deposit is small; many particles land per cell → smoke.
+     ============================================================ */
+  // Display window in (x, y) space — the attractor lives in [-2, 2]^2,
+  // we fit that to the density buffer with a small inset.
+  const VIEW_HALF = 2.05;
+  function mapXY(x, y) {
+    // returns linear density index, or -1 if out of buffer
+    const u = (x + VIEW_HALF) / (2 * VIEW_HALF);
+    const v = (y + VIEW_HALF) / (2 * VIEW_HALF);
+    if (u < 0 || u >= 1 || v < 0 || v >= 1) return -1;
+    return ((v * GH) | 0) * GW + ((u * GW) | 0);
+  }
+
+  function step(a, b, c, d, depositGain) {
+    for (let i = 0; i < N; i++) {
+      const x = px[i];
+      const y = py[i];
+      const xn = Math.sin(a * y) - Math.cos(b * x);
+      const yn = Math.sin(c * x) - Math.cos(d * y);
+      px[i] = xn;
+      py[i] = yn;
+      const idx = mapXY(xn, yn);
+      if (idx >= 0) density[idx] += depositGain;
+    }
+  }
+
+  /* ============================================================
+     4. palette LUT — paper ramp tipped with ember at peak density
+     ============================================================ */
+  const INK     = [10, 9, 7];
+  const PAPER_D = [148, 136, 118];
+  const PAPER   = [232, 225, 212];
+  const EMBER   = [201, 132, 74];
+
+  const LUT = new Uint8ClampedArray(256 * 4);
+  let lutBuilt = false;
+
+  function lerp(a, b, t) { return a + (b - a) * t; }
+
+  function buildLUT() {
+    for (let i = 0; i < 256; i++) {
+      const t = i / 255;
+      const tg = Math.pow(t, 0.42);
+      let r, g, bl;
+      if (tg < 0.32) {
+        const k = tg / 0.32;
+        r  = lerp(INK[0], PAPER_D[0], k);
+        g  = lerp(INK[1], PAPER_D[1], k);
+        bl = lerp(INK[2], PAPER_D[2], k);
+      } else if (tg < 0.80) {
+        const k = (tg - 0.32) / 0.48;
+        r  = lerp(PAPER_D[0], PAPER[0], k);
+        g  = lerp(PAPER_D[1], PAPER[1], k);
+        bl = lerp(PAPER_D[2], PAPER[2], k);
+      } else {
+        const k = (tg - 0.80) / 0.20;
+        r  = lerp(PAPER[0], EMBER[0], k);
+        g  = lerp(PAPER[1], EMBER[1], k);
+        bl = lerp(PAPER[2], EMBER[2], k);
+      }
+      const o = i * 4;
+      LUT[o]     = r;
+      LUT[o + 1] = g;
+      LUT[o + 2] = bl;
+      LUT[o + 3] = 255;
+    }
+    lutBuilt = true;
+  }
+
+  // Exposure auto-scales so the brightest 0.05% of cells map to top of LUT.
+  let exposure = 6.0;
+  function autoExpose() {
+    // Sample stride
+    let maxV = 0;
+    for (let i = 0; i < density.length; i += 47) {
+      const v = density[i];
+      if (v > maxV) maxV = v;
+    }
+    if (maxV < 0.001) maxV = 0.001;
+    const target = 255 / maxV;
+    // very slow ema → exposure stabilises across beats
+    exposure = exposure * 0.96 + target * 0.04;
+  }
+
+  function paint(decay) {
+    if (!lutBuilt) buildLUT();
+    autoExpose();
+
+    const data = imgBuf.data;
+    const n = GW * GH;
+    for (let i = 0; i < n; i++) {
+      const v = density[i];
+      let li = (v * exposure) | 0;
+      if (li > 255) li = 255;
+      else if (li < 0) li = 0;
+      const lo = li * 4;
+      const o = i * 4;
+      data[o]     = LUT[lo];
+      data[o + 1] = LUT[lo + 1];
+      data[o + 2] = LUT[lo + 2];
+      data[o + 3] = 255;
+      // decay in-place (so next frame the trail fades)
+      density[i] = v * decay;
+    }
+    imgCtx.putImageData(imgBuf, 0, 0);
+    dctx.fillStyle = '#0a0907';
+    dctx.fillRect(0, 0, DW, DH);
+    dctx.imageSmoothingEnabled = true;
+    dctx.imageSmoothingQuality = 'high';
+    dctx.drawImage(imgCanvas, 0, 0, DW, DH);
+  }
+
+  /* ============================================================
+     5. audio (Web Audio + per-band spectral flux)
+     ============================================================ */
+  const audioEl = document.getElementById('audioEl');
+  let actx = null, srcNode = null, analyser = null;
+  let freqBuf = null, prevFFT = null;
+  let audioReady = false;
+
+  const onsetState = {
+    bass:   { mean: 0.001, last: -999, mult: 2.3, floor: 0.020, debounceMs: 110 },
+    mid:    { mean: 0.001, last: -999, mult: 1.9, floor: 0.013, debounceMs: 70  },
+    treble: { mean: 0.001, last: -999, mult: 1.6, floor: 0.008, debounceMs: 40  }
+  };
+
+  // Onset envelopes — each onset spikes its envelope, which then decays.
+  // The envelopes drive transient nudges of (a, b, c, d).
+  const env = { bass: 0, mid: 0, treble: 0 };
+  const ENV_DECAY = 0.88;     // ~14 frames half-life
+  let kickFlashUntil = 0, snareFlashUntil = 0, hatFlashUntil = 0;
+
+  // Smoothed band levels (continuous coupling)
+  const lvl = { bass: 0, mid: 0, treble: 0, centroid: 0 };
+
+  function ensureCtx() {
+    if (actx) return;
+    actx = new (window.AudioContext || window.webkitAudioContext)();
+    srcNode = actx.createMediaElementSource(audioEl);
+    analyser = actx.createAnalyser();
+    analyser.fftSize = 4096;
+    analyser.smoothingTimeConstant = 0.05;
+    srcNode.connect(analyser);
+    analyser.connect(actx.destination);
+    freqBuf = new Uint8Array(analyser.frequencyBinCount);
+    prevFFT = new Uint8Array(analyser.frequencyBinCount);
+  }
+
+  function loadFile(file) {
+    if (!file) return;
+    try {
+      const url = URL.createObjectURL(file);
+      audioEl.src = url;
+      audioEl.loop = true;
+      ensureCtx();
+      const p = audioEl.play();
+      if (p && p.then) {
+        p.then(() => {
+          audioReady = true;
+          const nm = file.name.length > 28 ? file.name.slice(0, 26) + '…' : file.name;
+          document.getElementById('hudMod').textContent = 'audio · ' + nm;
+          document.getElementById('entry').classList.add('gone');
+        }).catch(err => {
+          document.getElementById('hudMod').textContent = 'audio · play blocked';
+          console.warn('play() rejected:', err);
+        });
+      }
+    } catch (e) { console.warn(e); }
+  }
+
+  function readAudio() {
+    analyser.getByteFrequencyData(freqBuf);
+    const nbin = freqBuf.length;
+    const hzPerBin = (actx.sampleRate * 0.5) / nbin;
+    let fB = 0, fM = 0, fT = 0;
+    let lB = 0, lM = 0, lT = 0;
+    let cB = 0, cM = 0, cT = 0;
+    let sumA = 0, sumF = 0;
+
+    for (let i = 1; i < nbin; i++) {
+      const hz = i * hzPerBin;
+      const cur = freqBuf[i];
+      const prev = prevFFT[i];
+      const dp = cur > prev ? (cur - prev) / 255 : 0;
+      const a = Math.sqrt(cur / 255);
+      sumA += a; sumF += a * hz;
+
+      if (hz >= 30 && hz < 160)      { fB += dp; lB += a; cB++; }
+      else if (hz >= 200 && hz < 2200) { fM += dp; lM += a; cM++; }
+      else if (hz >= 3500 && hz < 11000) { fT += dp; lT += a; cT++; }
+
+      prevFFT[i] = cur;
+    }
+
+    return {
+      bassFlux:  cB ? fB / cB : 0,
+      midFlux:   cM ? fM / cM : 0,
+      hatFlux:   cT ? fT / cT : 0,
+      bassLvl:   cB ? lB / cB : 0,
+      midLvl:    cM ? lM / cM : 0,
+      hatLvl:    cT ? lT / cT : 0,
+      centroid:  sumA > 1e-4 ? Math.min(1, Math.max(0, (sumF / sumA - 200) / 5800)) : 0
+    };
+  }
+
+  function detectAndApply(now) {
+    const a = readAudio();
+    // continuous (slow) coupling
+    lvl.bass     = lvl.bass     * 0.86 + a.bassLvl  * 0.14;
+    lvl.mid      = lvl.mid      * 0.86 + a.midLvl   * 0.14;
+    lvl.treble   = lvl.treble   * 0.82 + a.hatLvl   * 0.18;
+    lvl.centroid = lvl.centroid * 0.96 + a.centroid * 0.04;
+
+    // per-band flux onsets
+    const map = [['bass', a.bassFlux], ['mid', a.midFlux], ['treble', a.hatFlux]];
+    for (let k = 0; k < map.length; k++) {
+      const key = map[k][0]; const fx = map[k][1];
+      const s = onsetState[key];
+      const trig = Math.max(s.mean * s.mult, s.floor);
+      if (fx > trig && (now - s.last) > s.debounceMs) {
+        s.last = now;
+        const strength = Math.min(1, (fx - trig) / Math.max(trig, 0.005));
+        env[key] = Math.min(1.0, env[key] + 0.55 + strength * 0.45);
+        if (key === 'bass')        kickFlashUntil  = performance.now() + 110;
+        else if (key === 'mid')    snareFlashUntil = performance.now() + 90;
+        else                       hatFlashUntil   = performance.now() + 55;
+      }
+      s.mean = s.mean * 0.92 + fx * 0.08;
+    }
+
+    // decay envelopes
+    env.bass   *= ENV_DECAY;
+    env.mid    *= ENV_DECAY;
+    env.treble *= ENV_DECAY;
+  }
+
+  /* ============================================================
+     6. synthetic carrier (fallback, 130 BPM 4/4)
+     ============================================================ */
+  let synthNext = 0, synthBeat = 0;
+  const BEAT_MS = 60000 / 130;
+  function synthAdvance(now) {
+    // continuous levels: slow drift
+    const t = now * 0.001;
+    lvl.bass     = 0.35 + 0.10 * Math.sin(t * 0.21);
+    lvl.mid      = 0.30 + 0.08 * Math.sin(t * 0.33 + 1.1);
+    lvl.treble   = 0.32 + 0.10 * Math.sin(t * 0.51 + 2.3);
+    lvl.centroid = 0.45 + 0.20 * Math.sin(t * 0.09);
+    // discrete kicks
+    if (now >= synthNext) {
+      env.bass = Math.min(1, env.bass + 0.8);
+      kickFlashUntil = performance.now() + 110;
+      if (synthBeat % 2 === 1) {
+        env.mid = Math.min(1, env.mid + 0.6);
+        snareFlashUntil = performance.now() + 90;
+      }
+      // hats on 8ths between beats — we'll schedule sub-beats here
+      synthBeat++;
+      synthNext = now + BEAT_MS;
+    }
+    // a sparse hat carrier
+    if (Math.random() < 0.06) {
+      env.treble = Math.min(1, env.treble + 0.4);
+      hatFlashUntil = performance.now() + 55;
+    }
+    env.bass   *= ENV_DECAY;
+    env.mid    *= ENV_DECAY;
+    env.treble *= ENV_DECAY;
+  }
+
+  /* ============================================================
+     7. parameter mapping — modulation → (a, b, c, d)
+     ============================================================
+     Base setting is a known-bounded De Jong configuration; audio offsets each
+     parameter within a tight range so the attractor stays compact.
+     ============================================================ */
+  const A0 = 1.40, B0 = -2.30, C0 = 1.70, D0 = -2.00;
+
+  function paramsFor() {
+    const a = A0 + (lvl.bass   - 0.3) * 0.50 + env.bass   * 0.55;
+    const b = B0 + (lvl.mid    - 0.3) * 0.45 + env.mid    * 0.45;
+    const c = C0 + (lvl.treble - 0.3) * 0.50 + env.treble * 0.55;
+    const d = D0 + (lvl.centroid - 0.45) * 0.40 + (env.bass + env.treble) * 0.18;
+    return { a: a, b: b, c: c, d: d };
+  }
+
+  /* ============================================================
+     8. render loop
+     ============================================================ */
+  let frame = 0;
+  let lastTime = performance.now();
+  let fpsEMA = 60;
+
+  const hudFps = document.getElementById('hudFps');
+  const hudMod = document.getElementById('hudMod');
+  const dKick  = document.getElementById('dKick');
+  const dSnare = document.getElementById('dSnare');
+  const dHat   = document.getElementById('dHat');
+  const pA = document.getElementById('pA'), vA = document.getElementById('vA');
+  const pB = document.getElementById('pB'), vB = document.getElementById('vB');
+  const pC = document.getElementById('pC'), vC = document.getElementById('vC');
+  const pD = document.getElementById('pD'), vD = document.getElementById('vD');
+
+  document.getElementById('hudN').textContent = (N / 1000).toFixed(0) + 'k';
+
+  function tick(now) {
+    const dt = now - lastTime;
+    lastTime = now;
+    fpsEMA = fpsEMA * 0.92 + (1000 / Math.max(dt, 1)) * 0.08;
+
+    if (audioReady && analyser) detectAndApply(now);
+    else                         synthAdvance(now);
+
+    const p = paramsFor();
+
+    // depositGain stays constant — visual brightness is entirely from
+    // the orbit's current shape (and exposure auto-adaptation), not from
+    // a direct audio-to-brightness coupling.
+    step(p.a, p.b, p.c, p.d, 1.0);
+    paint(0.90);
+
+    if ((frame & 3) === 0) {
+      const tNow = performance.now();
+      dKick.classList.toggle('lit', tNow < kickFlashUntil);
+      dSnare.classList.toggle('lit', tNow < snareFlashUntil);
+      dHat.classList.toggle('lit', tNow < hatFlashUntil);
+      hudFps.textContent = fpsEMA.toFixed(0) + 'fps';
+
+      // parameter readout: scale each into [-4,+4] for the bar position
+      function setBar(barEl, valEl, v) {
+        const pos = Math.max(0, Math.min(1, (v + 4) / 8));
+        barEl.style.left = (pos * 100).toFixed(0) + '%';
+        valEl.textContent = v.toFixed(2);
+      }
+      setBar(pA, vA, p.a);
+      setBar(pB, vB, p.b);
+      setBar(pC, vC, p.c);
+      setBar(pD, vD, p.d);
+
+      if (!audioReady) {
+        hudMod.textContent = 'autonomous · 130 bpm';
+      } else {
+        const head = hudMod.textContent.split(' · ')[0];
+        hudMod.textContent = head + ' · ' + (audioEl.paused ? 'paused' : 'playing');
+      }
+    }
+    frame++;
+    requestAnimationFrame(tick);
+  }
+
+  /* ============================================================
+     9. UI + file handling
+     ============================================================ */
+  const picker = document.getElementById('picker');
+  picker.addEventListener('change', (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (file) loadFile(file);
+  });
+  ['dragenter', 'dragover'].forEach(ev => {
+    window.addEventListener(ev, (e) => { e.preventDefault(); document.body.classList.add('dragging'); });
+  });
+  ['dragleave', 'drop'].forEach(ev => {
+    window.addEventListener(ev, (e) => { e.preventDefault(); document.body.classList.remove('dragging'); });
+  });
+  window.addEventListener('drop', (e) => {
+    e.preventDefault();
+    const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (file) loadFile(file);
+  });
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'r' || e.key === 'R') {
+      seedParticles();
+      density.fill(0);
+    }
+    if (e.code === 'Space' && audioReady) {
+      if (audioEl.paused) audioEl.play(); else audioEl.pause();
+      e.preventDefault();
+    }
+  });
+
+  window.addEventListener('resize', resize);
+  resize();
+  seedParticles();
+  requestAnimationFrame(tick);
+
+})();
+</script>
+</body>
+</html>

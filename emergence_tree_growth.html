@@ -1,0 +1,532 @@
+<!doctype html>
+<!--
+  emergence machine · visualization · differential growth (tree / L-system)
+  Substrate: a node graph that grows over the song. Each event in the score
+  is a different growth rule:
+    KICK    extend the most recently grown tip outward by a step
+    BASS    branch a random tip into two children at ±25°
+    SNARE   spawn a side-branch from a random mid-depth node (big sprout)
+    PERC    spawn a twig from a random recent node (small sideways)
+    HAT     extend a random tip by a small twig
+    SUB     gentle global sway on every node (background motion)
+  Visible image is the line-drawing of every parent→child pair.
+  Trunk gets thicker (lower depth), twigs are hairline. Recent additions are
+  ember-tinted; older fade to paper-dim, then paper.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>emergence · tree growth · audio</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;1,400&family=JetBrains+Mono:wght@300;400&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ink:        #0a0907;
+    --paper:      #e8e1d4;
+    --paper-dim:  #948876;
+    --ember:      #c9844a;
+    --slate:      #6b8a8f;
+    --rule:       rgba(232, 225, 212, 0.12);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; background: var(--ink); color: var(--paper); font-family: 'Cormorant Garamond', serif; overflow: hidden; }
+  #stage { position: fixed; inset: 0; display: block; background: var(--ink); }
+
+  .hud { position: fixed; font-family: 'JetBrains Mono', monospace; font-weight: 300; font-size: 10px; letter-spacing: 0.24em; text-transform: lowercase; color: var(--paper-dim); pointer-events: none; user-select: none; }
+  .hud.tl { top: 28px; left: 32px; }
+  .hud.br { bottom: 28px; right: 32px; }
+  .hud .v { color: var(--paper); }
+  .hud .row { display: flex; align-items: center; gap: 8px; }
+  .dot { width: 5px; height: 5px; border: 1px solid var(--rule); display: inline-block; transition: background-color 80ms ease, border-color 80ms ease; }
+  .dot.lit { background: var(--paper); border-color: var(--paper); }
+  .dot.lit.kick { background: var(--ember); border-color: var(--ember); }
+
+  .timeline { position: fixed; left: 5%; right: 5%; bottom: 16px; height: 1px; background: var(--rule); pointer-events: none; }
+  .timeline > i { position: absolute; top: -2px; width: 1px; height: 5px; background: var(--paper); left: 0%; }
+
+  #entry { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 28px; background: radial-gradient(ellipse at center, rgba(10,9,7,0.55) 0%, rgba(10,9,7,0.92) 70%); z-index: 10; transition: opacity 1s ease, visibility 1s ease; }
+  #entry.gone { opacity: 0; visibility: hidden; }
+  #entry .title { font-family: 'Cormorant Garamond', serif; font-weight: 300; font-style: italic; font-size: 36px; color: var(--paper); text-align: center; max-width: 32ch; line-height: 1.2; }
+  #entry .sub { font-family: 'JetBrains Mono', monospace; font-weight: 300; font-size: 11px; color: var(--paper-dim); letter-spacing: 0.32em; text-transform: lowercase; text-align: center; max-width: 60ch; }
+  #entry .play { display: inline-block; cursor: pointer; padding: 14px 26px; border: 1px solid var(--rule); color: var(--paper); font-family: 'JetBrains Mono', monospace; font-weight: 300; font-size: 11px; letter-spacing: 0.32em; text-transform: lowercase; background: transparent; }
+  #entry .play:hover { border-color: var(--paper); color: var(--ember); }
+  #entry .hint { font-family: 'JetBrains Mono', monospace; font-weight: 300; font-size: 9px; letter-spacing: 0.32em; color: var(--paper-dim); text-transform: lowercase; opacity: 0.7; text-align: center; }
+</style>
+</head>
+<body>
+
+<canvas id="stage"></canvas>
+
+<div class="hud tl">
+  <div>differential growth · scored timeline</div>
+  <div style="margin-top:10px;" class="row"><span class="dot kick" id="dKick"></span> <span>kick · extend tip</span></div>
+  <div class="row"><span class="dot" id="dBass"></span> <span>bass · branch</span></div>
+  <div class="row"><span class="dot" id="dSnare"></span> <span>snare · side-branch</span></div>
+  <div class="row"><span class="dot" id="dPerc"></span> <span>perc · twig</span></div>
+  <div class="row"><span class="dot" id="dHat"></span> <span>hat · short twig</span></div>
+  <div style="margin-top:10px;"><span class="v" id="hudNodes">0</span> nodes &nbsp;·&nbsp; <span class="v" id="hudTips">0</span> tips</div>
+  <div><span id="hudTime">0:00</span> &nbsp; <span class="v" id="hudSection">—</span></div>
+</div>
+<div class="hud br"><span class="v" id="hudFps">—</span></div>
+
+<div class="timeline"><i id="timelineCursor"></i></div>
+
+<div id="entry">
+  <div class="title">differential growth</div>
+  <div class="sub">every beat extends a branch · the tree is the song made botanical</div>
+  <input id="picker" type="file" accept="audio/*" style="display:none">
+  <label class="play" for="picker">load audio</label>
+  <div class="hint" id="loadStatus">timeline embedded · click to play</div>
+</div>
+
+<audio id="audioEl" loop></audio>
+
+<script>
+(() => {
+  'use strict';
+
+  // ---- canvas ----
+  const canvas = document.getElementById('stage');
+  const ctx = canvas.getContext('2d');
+  let W = 0, H = 0, cx = 0, cy = 0;
+  const DPR = Math.min(window.devicePixelRatio || 1, 2);
+  function resize() {
+    W = Math.floor(window.innerWidth  * DPR);
+    H = Math.floor(window.innerHeight * DPR);
+    canvas.width = W; canvas.height = H;
+    canvas.style.width = window.innerWidth + 'px';
+    canvas.style.height = window.innerHeight + 'px';
+    cx = W * 0.5; cy = H * 0.5;
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // ---- score (inline preferred) ----
+  let score = null;
+  const cursors = {};
+  function applyScore(data) {
+    score = data;
+    for (const band in data.events) cursors[band] = 0;
+    document.getElementById('loadStatus').textContent =
+      'timeline loaded · ' + Object.values(data.events).reduce((s, e) => s + e.length, 0) +
+      ' events · ' + data.duration.toFixed(1) + 's · click to play';
+  }
+  if (window.__SCORE) applyScore(window.__SCORE);
+  else fetch('track_events.json').then(r => r.json()).then(applyScore).catch(() => {
+    document.getElementById('loadStatus').textContent = 'no timeline (degraded)';
+  });
+
+  // ---- audio ----
+  const audioEl = document.getElementById('audioEl');
+  let audioReady = false;
+  document.getElementById('picker').addEventListener('change', (e) => {
+    const f = e.target.files && e.target.files[0]; if (!f) return;
+    audioEl.src = URL.createObjectURL(f);
+    audioEl.loop = true;
+    audioEl.play().then(() => {
+      audioReady = true;
+      document.getElementById('entry').classList.add('gone');
+      resetGrowth();
+      for (const band in cursors) cursors[band] = 0;
+    }).catch(err => console.warn(err));
+  });
+
+  /* =========================================================
+     GROWTH SUBSTRATE — node graph
+     ========================================================= */
+  // Pre-sized Float32Arrays so we don't fragment the heap.
+  const MAX_NODES = 3000;
+  const nx = new Float32Array(MAX_NODES);
+  const ny = new Float32Array(MAX_NODES);
+  const nParent = new Int32Array(MAX_NODES);
+  const nDepth = new Int16Array(MAX_NODES);
+  const nAngle = new Float32Array(MAX_NODES);
+  const nBand  = new Uint8Array(MAX_NODES);       // 0=root, 1=kick, 2=bass, 3=snare, 4=perc, 5=hat, 6=sub
+  const nAge   = new Float32Array(MAX_NODES);     // for fading from ember → paper
+  let nodeCount = 0;
+  let tips = [];                                  // indices into nodes that can still grow
+
+  // Per-band growth probabilities (event → growth-action chance). Throttles event
+  // density so the tree doesn't outgrow the canvas.
+  const GROWTH_PROB = { kick: 0.18, bass: 0.22, snare: 0.95, perc: 0.16, hat: 0.18 };
+  // Step sizes (px at 1× DPR)
+  const STEP = { kick: 9, bass: 7, snare: 11, perc: 4, hat: 3 };
+
+  function resetGrowth() {
+    nodeCount = 0;
+    tips = [];
+    // Single root at centre
+    addNode(cx, cy, -1, 0, 0, 0);
+    // 8 initial tips spread radially so growth fans out
+    for (let i = 0; i < 8; i++) {
+      const ang = (i / 8) * Math.PI * 2 + Math.random() * 0.1;
+      const r = Math.min(W, H) * 0.02;
+      const idx = addNode(cx + Math.cos(ang) * r, cy + Math.sin(ang) * r, 0, 1, ang, 0);
+      tips.push(idx);
+    }
+  }
+
+  function addNode(x, y, parent, depth, angle, band) {
+    if (nodeCount >= MAX_NODES) return -1;
+    const i = nodeCount++;
+    nx[i] = x; ny[i] = y;
+    nParent[i] = parent;
+    nDepth[i] = depth;
+    nAngle[i] = angle;
+    nBand[i] = band;
+    nAge[i] = 0;
+    return i;
+  }
+
+  function inBounds(x, y) {
+    const maxR = Math.min(W, H) * 0.48;
+    const dx = x - cx, dy = y - cy;
+    return (dx * dx + dy * dy) < (maxR * maxR);
+  }
+
+  // Bias angle toward radial-outward from centre. Strength controls how
+  // strongly the inherited angle gets pulled toward "pointing away from cx,cy".
+  function biasOutward(x, y, ang, strength) {
+    const dx = x - cx, dy = y - cy;
+    const radialAng = Math.atan2(dy, dx);
+    // Take the shortest angular path
+    let d = radialAng - ang;
+    while (d >  Math.PI) d -= Math.PI * 2;
+    while (d < -Math.PI) d += Math.PI * 2;
+    return ang + d * strength;
+  }
+
+  function extendTip(tipIdx, stepLen, angleVariation, band) {
+    if (tipIdx < 0 || tipIdx >= nodeCount) return false;
+    // Outward bias is stronger for nodes near the centre (where it's congested)
+    const dxc = nx[tipIdx] - cx, dyc = ny[tipIdx] - cy;
+    const distFromCentre = Math.sqrt(dxc * dxc + dyc * dyc);
+    const maxR = Math.min(W, H) * 0.48;
+    const outwardBias = 0.55 * Math.max(0, 1 - distFromCentre / (maxR * 0.7));
+    let baseAng = nAngle[tipIdx] + (Math.random() - 0.5) * angleVariation;
+    baseAng = biasOutward(nx[tipIdx], ny[tipIdx], baseAng, outwardBias);
+    // Larger step when close to centre — helps escape the congested zone
+    const stepBoost = 1 + (distFromCentre < maxR * 0.25 ? 1.5 : 0);
+    const ang = baseAng;
+    const newX = nx[tipIdx] + Math.cos(ang) * stepLen * DPR * stepBoost;
+    const newY = ny[tipIdx] + Math.sin(ang) * stepLen * DPR * stepBoost;
+    if (!inBounds(newX, newY)) return false;
+    const newIdx = addNode(newX, newY, tipIdx, nDepth[tipIdx] + 1, ang, band);
+    if (newIdx < 0) return false;
+    const pos = tips.indexOf(tipIdx);
+    if (pos >= 0) tips[pos] = newIdx;
+    return true;
+  }
+
+  function branchTip(tipIdx, branchAngle, stepLen, band) {
+    if (tipIdx < 0 || tipIdx >= nodeCount) return false;
+    const dxc = nx[tipIdx] - cx, dyc = ny[tipIdx] - cy;
+    const distFromCentre = Math.sqrt(dxc * dxc + dyc * dyc);
+    const maxR = Math.min(W, H) * 0.48;
+    const outwardBias = 0.45 * Math.max(0, 1 - distFromCentre / (maxR * 0.7));
+    const stepBoost = 1 + (distFromCentre < maxR * 0.25 ? 1.3 : 0);
+    let any = false;
+    for (const sign of [-1, 1]) {
+      let ang = nAngle[tipIdx] + sign * branchAngle;
+      ang = biasOutward(nx[tipIdx], ny[tipIdx], ang, outwardBias);
+      const newX = nx[tipIdx] + Math.cos(ang) * stepLen * DPR * stepBoost;
+      const newY = ny[tipIdx] + Math.sin(ang) * stepLen * DPR * stepBoost;
+      if (!inBounds(newX, newY)) continue;
+      const newIdx = addNode(newX, newY, tipIdx, nDepth[tipIdx] + 1, ang, band);
+      if (newIdx >= 0) {
+        tips.push(newIdx);
+        any = true;
+      }
+    }
+    if (any) {
+      const pos = tips.indexOf(tipIdx);
+      if (pos >= 0) tips.splice(pos, 1);
+    }
+    return any;
+  }
+
+  function sideBranch(parentIdx, stepLen, band) {
+    if (parentIdx < 0 || parentIdx >= nodeCount) return false;
+    const ang = nAngle[parentIdx] + ((Math.random() < 0.5) ? -1 : 1) *
+                (0.9 + Math.random() * 0.4);
+    const newX = nx[parentIdx] + Math.cos(ang) * stepLen * DPR;
+    const newY = ny[parentIdx] + Math.sin(ang) * stepLen * DPR;
+    if (!inBounds(newX, newY)) return false;
+    const newIdx = addNode(newX, newY, parentIdx, nDepth[parentIdx] + 1, ang, band);
+    if (newIdx >= 0) tips.push(newIdx);
+    return true;
+  }
+
+  function applyEvent(band, strength) {
+    // Supercharge growth in the brief window right after an explosion (drop)
+    const boost = (performance.now() < explosionUntil) ? 2.2 : 1.0;
+    if (Math.random() > (GROWTH_PROB[band] || 0) * boost) return;
+    const tipCount = tips.length;
+    if (tipCount === 0) return;
+    if (band === 'kick') {
+      // Extend a random tip outward
+      const tip = tips[(Math.random() * tipCount) | 0];
+      extendTip(tip, STEP.kick + strength * 4, 0.35, 1);
+    } else if (band === 'bass') {
+      // Branch a random tip into two
+      const tip = tips[(Math.random() * tipCount) | 0];
+      branchTip(tip, 0.42 + Math.random() * 0.15, STEP.bass + strength * 3, 2);
+    } else if (band === 'snare') {
+      // Side branch from a random mid-depth node (not just tips)
+      if (nodeCount > 12) {
+        const parent = 8 + ((Math.random() * (nodeCount - 8)) | 0);
+        sideBranch(parent, STEP.snare + strength * 4, 3);
+      }
+    } else if (band === 'perc') {
+      // Small twig from a random recent node
+      const recent = Math.max(8, nodeCount - 100);
+      const parent = recent + ((Math.random() * (nodeCount - recent)) | 0);
+      sideBranch(parent, STEP.perc, 4);
+    } else if (band === 'hat') {
+      // Short twig — extend a tip a tiny amount with high angle variation
+      const tip = tips[(Math.random() * tipCount) | 0];
+      extendTip(tip, STEP.hat, 0.55, 5);
+    }
+  }
+
+  /* =========================================================
+     event drain (audio-clock)
+     ========================================================= */
+  const last = { sub:-999, kick:-999, bass:-999, low_mid:-999, snare:-999, perc:-999, hat:-999 };
+  let nextSection = 1;         // index into score.sections; 0 is the trivial start
+  let explosionFlash = 0;      // visual flash intensity, decays per frame
+  let explosionUntil = -999;   // ms timestamp — growth is supercharged briefly after a drop
+
+  /* Triggered on a section boundary (e.g. the bass drop at sections[1] = 83s).
+     Pushes every tip outward by a big jump and spawns extra branches from a
+     fraction of them, then sets a window during which growth is faster. */
+  function explosion() {
+    explosionFlash = 1.0;
+    explosionUntil = performance.now() + 1800;
+    const tipCount = tips.length;
+    const newTips = [];
+    for (let i = 0; i < tipCount; i++) {
+      const tip = tips[i];
+      if (tip < 0 || tip >= nodeCount) continue;
+      // Big outward jump along the radial direction
+      const dx = nx[tip] - cx, dy = ny[tip] - cy;
+      const dist = Math.sqrt(dx * dx + dy * dy) + 1e-3;
+      const ang = Math.atan2(dy, dx);
+      const jump = Math.min(W, H) * 0.12 + Math.random() * Math.min(W, H) * 0.08;
+      const tgtX = nx[tip] + Math.cos(ang) * jump;
+      const tgtY = ny[tip] + Math.sin(ang) * jump;
+      if (!inBounds(tgtX, tgtY)) { newTips.push(tip); continue; }
+      const newIdx = addNode(tgtX, tgtY, tip, nDepth[tip] + 1, ang, 2);
+      if (newIdx < 0) { newTips.push(tip); continue; }
+      newTips.push(newIdx);
+      // Also spawn 1–2 side branches off the tip itself
+      if (Math.random() < 0.7) {
+        for (const sign of [-1, 1]) {
+          const sAng = ang + sign * (0.45 + Math.random() * 0.35);
+          const sStep = Math.min(W, H) * (0.05 + Math.random() * 0.05);
+          const sx = nx[tip] + Math.cos(sAng) * sStep;
+          const sy = ny[tip] + Math.sin(sAng) * sStep;
+          if (!inBounds(sx, sy)) continue;
+          const sIdx = addNode(sx, sy, tip, nDepth[tip] + 1, sAng, 2);
+          if (sIdx >= 0) newTips.push(sIdx);
+        }
+      }
+    }
+    tips = newTips;
+  }
+
+  function drainEvents(t) {
+    if (!score) return;
+    if (audioEl.currentTime < (cursors.__last_t || 0) - 0.5) {
+      for (const band in score.events) {
+        cursors[band] = 0;
+        const list = score.events[band];
+        while (cursors[band] < list.length && list[cursors[band]][0] < t) cursors[band]++;
+      }
+      nextSection = 1;
+      const secs = score.sections || [];
+      while (nextSection < secs.length && secs[nextSection] < t) nextSection++;
+    }
+    for (const band in score.events) {
+      const list = score.events[band];
+      let c = cursors[band];
+      while (c < list.length && list[c][0] <= t) {
+        const strength = list[c][1];
+        last[band] = performance.now();
+        const visBand = (band === 'low_mid') ? 'snare' : band;
+        if (GROWTH_PROB[visBand] !== undefined) applyEvent(visBand, strength);
+        c++;
+      }
+      cursors[band] = c;
+    }
+    // Section boundary crossing → explosion
+    const secs = score.sections || [];
+    while (nextSection < secs.length && secs[nextSection] <= t) {
+      explosion();
+      nextSection++;
+    }
+    cursors.__last_t = audioEl.currentTime;
+  }
+
+  /* =========================================================
+     RENDER
+     ========================================================= */
+  // Per-band colour (rgba string template)
+  const BAND_COLOR = [
+    'rgba(232, 225, 212, ',   // 0 root
+    'rgba(232, 225, 212, ',   // 1 kick — paper, thick
+    'rgba(232, 225, 212, ',   // 2 bass — paper
+    'rgba(232, 225, 212, ',   // 3 snare — paper
+    'rgba(148, 136, 118, ',   // 4 perc — paper-dim
+    'rgba(148, 136, 118, ',   // 5 hat  — paper-dim, thin
+    'rgba(107, 138, 143, '    // 6 sub  — slate
+  ];
+
+  function render() {
+    // Soft trailing background — fade old content slightly each frame so the
+    // tree is mostly persistent but recently-added lines glow ember briefly.
+    ctx.fillStyle = 'rgba(10, 9, 7, 1)';
+    ctx.fillRect(0, 0, W, H);
+
+    // Draw every parent→child segment
+    ctx.lineCap = 'round';
+    for (let i = 1; i < nodeCount; i++) {
+      const p = nParent[i];
+      if (p < 0) continue;
+      const x1 = nx[p], y1 = ny[p];
+      const x2 = nx[i], y2 = ny[i];
+      const depth = nDepth[i];
+      const band = nBand[i];
+      // line width: trunk thicker, twigs thinner
+      const w = Math.max(0.5, 3.2 - depth * 0.14) * DPR;
+      // ember tint on very recent nodes (age < 1 sec ~ 60 frames)
+      nAge[i] += 1;
+      const recent = Math.max(0, 1 - nAge[i] / 60);
+      let r, g, b, alpha;
+      if (recent > 0.02) {
+        // ember-tinted lerp
+        r = 201 * recent + 232 * (1 - recent);
+        g = 132 * recent + 225 * (1 - recent);
+        b =  74 * recent + 212 * (1 - recent);
+        alpha = 0.85;
+      } else {
+        // base color from band
+        const col = BAND_COLOR[band] || BAND_COLOR[0];
+        ctx.strokeStyle = col + '0.7)';
+        ctx.lineWidth = w;
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+        continue;
+      }
+      ctx.strokeStyle = 'rgba(' + (r|0) + ',' + (g|0) + ',' + (b|0) + ',' + alpha.toFixed(3) + ')';
+      ctx.lineWidth = w * (1 + recent * 0.4);
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.stroke();
+    }
+
+    // small dot at each TIP (active growth point)
+    ctx.fillStyle = 'rgba(201, 132, 74, 0.8)';
+    for (let t = 0; t < tips.length; t++) {
+      const i = tips[t];
+      if (i < 0 || i >= nodeCount) continue;
+      ctx.beginPath();
+      ctx.arc(nx[i], ny[i], 1.4 * DPR, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // EXPLOSION flash — radial ember halo from centre on the drop
+    if (explosionFlash > 0.02) {
+      const r = Math.min(W, H) * (0.05 + (1 - explosionFlash) * 0.55);
+      const a = Math.min(0.95, explosionFlash);
+      const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+      grad.addColorStop(0,   'rgba(201, 132, 74, ' + (a * 0.30).toFixed(3) + ')');
+      grad.addColorStop(0.5, 'rgba(201, 132, 74, ' + (a * 0.10).toFixed(3) + ')');
+      grad.addColorStop(1,   'rgba(10, 9, 7, 0)');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.fill();
+      // sharp outer ring
+      ctx.strokeStyle = 'rgba(201, 132, 74, ' + (a * 0.6).toFixed(3) + ')';
+      ctx.lineWidth = 2 * DPR;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.stroke();
+      explosionFlash *= 0.94;
+    }
+  }
+
+  /* =========================================================
+     render loop
+     ========================================================= */
+  let frame = 0;
+  let lastTime = performance.now();
+  let fpsEMA = 60;
+
+  const dKick  = document.getElementById('dKick');
+  const dBass  = document.getElementById('dBass');
+  const dSnare = document.getElementById('dSnare');
+  const dPerc  = document.getElementById('dPerc');
+  const dHat   = document.getElementById('dHat');
+  const hudNodes = document.getElementById('hudNodes');
+  const hudTips  = document.getElementById('hudTips');
+  const hudTime  = document.getElementById('hudTime');
+  const hudSec   = document.getElementById('hudSection');
+  const hudFps   = document.getElementById('hudFps');
+  const tlc      = document.getElementById('timelineCursor');
+
+  function formatTime(t) {
+    const m = Math.floor(t / 60);
+    const s = Math.floor(t - m * 60);
+    return m + ':' + (s < 10 ? '0' : '') + s;
+  }
+
+  if (W > 0) resetGrowth();
+
+  function tick(now) {
+    const dt = now - lastTime; lastTime = now;
+    fpsEMA = fpsEMA * 0.92 + (1000 / Math.max(dt, 1)) * 0.08;
+
+    if (nodeCount === 0) resetGrowth();
+    if (audioReady && score) drainEvents(audioEl.currentTime);
+    render();
+
+    if ((frame & 3) === 0) {
+      const N = performance.now();
+      dKick.classList.toggle('lit',  N - last.kick  < 80);
+      dBass.classList.toggle('lit',  N - last.bass  < 90);
+      dSnare.classList.toggle('lit', N - last.snare < 200);
+      dPerc.classList.toggle('lit',  N - last.perc  < 80);
+      dHat.classList.toggle('lit',   N - last.hat   < 80);
+      hudNodes.textContent = nodeCount.toString();
+      hudTips.textContent  = tips.length.toString();
+      hudFps.textContent   = fpsEMA.toFixed(0) + 'fps';
+      if (audioReady && score) {
+        const t = audioEl.currentTime;
+        hudTime.textContent = formatTime(t);
+        hudSec.textContent = (t < 83 ? 'intro' : t < 209 ? 'main' : 'outro');
+        tlc.style.left = (t / score.duration * 100).toFixed(2) + '%';
+      }
+    }
+    frame++;
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'r' || e.key === 'R') resetGrowth();
+    if (e.code === 'Space' && audioReady) {
+      if (audioEl.paused) audioEl.play(); else audioEl.pause();
+      e.preventDefault();
+    }
+  });
+})();
+</script>
+</body>
+</html>
