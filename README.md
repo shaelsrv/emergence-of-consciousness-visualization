@@ -5,7 +5,7 @@ substrate, modulated by sound, producing global pattern. Single-file HTML
 artifacts following the spec in [CLAUDE.md](CLAUDE.md): substrate + local
 rules + audio modulation, warm-dark house aesthetic, no build step.
 
-I created it for my track use it for your own if you like. 
+I created it for my track, use it for your own if you like. 
 Try it yourself at https://emergencemachine.com/tools/emergence-of-consciousness/
 ## Pipeline
 
